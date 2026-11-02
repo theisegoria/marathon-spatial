@@ -112,7 +112,7 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Source, voice and bed rendering, the engine | In the tree, with CPU tests |
 | Live Core Audio output | In the tree. Not yet run on a device |
 | Head tracking from headphone sensors | In the tree. Not yet checked on real headphones |
-| Marathon Spatial Studio | Builds on the library, with offline render tests. The app has not been opened yet |
+| Marathon Spatial Studio | Builds on the library, with offline render tests. Opened and inspected on macOS 27; no listening review yet |
 | Bundled measured HRTF sets | Four sets in [`data/hrtf`](data/hrtf/PROVENANCE.md) |
 | Stereo speaker path | In Studio: an equal-power pan with distance gain and no reflections |
 
