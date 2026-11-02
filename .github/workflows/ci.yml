@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # macOS 27 on Apple silicon. This image is a public preview, so it may queue.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # Hosted runners have no reliable Metal ray tracing, so GPU tests run on a developer's Mac.
+      # Tests render offline and never open an audio device.
+      - name: Test
+        run: ctest --test-dir build --label-regex cpu --output-on-failure
+
+      - name: Demo content matches its provenance
+        run: python3 demo/synthesize_demo_content.py build/demo --verify
+
+      - name: Studio, linked to the library
+        working-directory: apps/MarathonSpatialStudio
+        env:
+          MARATHON_SPATIAL_REQUIRE_LINKED: "1"
+        run: swift test
+
+  licensing:
+    runs-on: xcode-27
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: REUSE
+        run: pipx run reuse==6.2.0 lint

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleName</key><string>Marathon Spatial Studio</string>
+    <key>CFBundleDisplayName</key><string>Marathon Spatial Studio</string>
+    <key>CFBundleIdentifier</key><string>org.marathonspatial.studio</string>
+    <key>CFBundleExecutable</key><string>MarathonSpatialStudio</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>27.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSMotionUsageDescription</key><string>Head tracking from your headphones keeps sound fixed in the room as you turn.</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Marathon Spatial Project</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Owner</string>
+            <key>LSTypeIsPackage</key><true/>
+            <key>LSItemContentTypes</key>
+            <array><string>org.marathonspatial.project</string></array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.marathonspatial.project</string>
+            <key>UTTypeDescription</key><string>Marathon Spatial Project</string>
+            <key>UTTypeConformsTo</key><array><string>com.apple.package</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict><key>public.filename-extension</key><array><string>mspatial</string></array></dict>
+        </dict>
+    </array>
+</dict>
+</plist>

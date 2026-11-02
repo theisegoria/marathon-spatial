@@ -1,0 +1,48 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.16,0.13,0.50,1.0",
+      "display-p3:0.04,0.05,0.17,1.0"
+    ],
+    "orientation" : {
+      "start" : { "x" : 0.5, "y" : 0 },
+      "stop" : { "x" : 0.5, "y" : 1 }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        { "glass" : true, "image-name" : "source.svg", "name" : "source" }
+      ],
+      "shadow" : { "kind" : "layer-color", "opacity" : 0.6 },
+      "specular" : true,
+      "translucency" : { "enabled" : false, "value" : 0 }
+    },
+    {
+      "layers" : [
+        { "glass" : true, "image-name" : "orbit-front.svg", "name" : "orbit-front" }
+      ],
+      "shadow" : { "kind" : "neutral", "opacity" : 0.4 },
+      "specular" : true,
+      "translucency" : { "enabled" : false, "value" : 0 }
+    },
+    {
+      "layers" : [
+        { "glass" : true, "image-name" : "headphones.svg", "name" : "headphones" }
+      ],
+      "shadow" : { "kind" : "neutral", "opacity" : 0.5 },
+      "specular" : true,
+      "translucency" : { "enabled" : true, "value" : 0.2 }
+    },
+    {
+      "layers" : [
+        { "glass" : false, "image-name" : "orbit-back.svg", "name" : "orbit-back", "opacity" : 0.75 }
+      ],
+      "shadow" : { "kind" : "none", "opacity" : 0 },
+      "translucency" : { "enabled" : false, "value" : 0 }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [ "macOS" ]
+  }
+}

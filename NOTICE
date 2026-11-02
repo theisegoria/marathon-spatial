@@ -1,0 +1,14 @@
+Marathon Spatial
+Copyright 2026 The Marathon Spatial Authors
+
+This product is licensed under the Apache License, Version 2.0.
+
+Third party components are listed in THIRD_PARTY_NOTICES.md, each with its own
+licence and pinned source.
+
+This product includes data developed at The Audio Lab, University of York, UK (Cal Armstrong, Lewis Thresh, Gavin
+Kearney) as part of the SADIE Project. Copyright 2018 The University of York.
+
+The MIT KEMAR HRTF measurements are copyright 1994 MIT Media Laboratory, by Bill Gardner and Keith Martin. Cite them as:
+W. G. Gardner and K. D. Martin, "HRTF Measurements of a KEMAR Dummy-Head Microphone", MIT Media Lab Perceptual Computing
+Technical Report 280, 1994.

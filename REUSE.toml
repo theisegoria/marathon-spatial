@@ -1,0 +1,70 @@
+# Licensing for every file that has no SPDX header of its own. See https://reuse.software.
+# Name directories explicitly: a catch-all would hide a file that arrived without a licence.
+version = 1
+
+[[annotations]]
+path = [
+    "*.md",
+    "NOTICE",
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "Package.swift",
+    ".gitignore",
+    ".gitattributes",
+    ".clang-format",
+    ".github/**",
+    "apps/**",
+    "cmake/**",
+    "data/HRTFData.swift",
+    "data/hrtf/PROVENANCE.md",
+    "docs/**",
+    "examples/**",
+    "include/**",
+    "shaders/**",
+    "src/**",
+    "swift/**",
+    "tests/**",
+    "tools/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 The Marathon Spatial Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["demo/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 The Marathon Spatial Authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = ["third_party/libmysofa/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "2016-2017 Symonics GmbH, Christian Hoene"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+# Cooked from the SADIE II Database. Modified as data/hrtf/PROVENANCE.md describes.
+[[annotations]]
+path = ["data/hrtf/sadie2_*.mshrtf"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2018 University of York"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Cooked from the MIT KEMAR measurements. The citation in NOTICE must stay with the data.
+[[annotations]]
+path = ["data/hrtf/mit_kemar.mshrtf"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "1994 MIT Media Laboratory, Bill Gardner and Keith Martin"
+SPDX-License-Identifier = "LicenseRef-MIT-KEMAR"
+
+# Later entries win: these files sit inside the vendored directory and are not covered by its BSD licence.
+[[annotations]]
+path = ["third_party/libmysofa/src/hrtf/portable_endian.h"]
+precedence = "override"
+SPDX-FileCopyrightText = "Mathias Panzenböck"
+SPDX-License-Identifier = "LicenseRef-Portable-Endian"
+
+[[annotations]]
+path = ["third_party/libmysofa/PROVENANCE.md"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 The Marathon Spatial Authors"
+SPDX-License-Identifier = "Apache-2.0"
