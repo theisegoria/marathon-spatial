@@ -83,6 +83,9 @@ final class ProjectSession {
     var meters = MeterFrame()
     var isConfiguring = false
     var configurationError: String?
+    /// Counts finished engine configurations. Views that read from the live engine (a body's modes) key their
+    /// queries on it: the engine learns of a new body only once its configuration lands, after the view first asks.
+    private(set) var configurationGeneration = 0
 
     var reflectionPaths: [ReflectionPath] = []
     var isImportingHRTF = false
@@ -154,6 +157,7 @@ final class ProjectSession {
                 guard !Task.isCancelled else { return }
                 try await engine.configure(configuration)
                 self?.configuredProject = project
+                self?.configurationGeneration += 1
                 self?.configurationError = nil
             } catch is CancellationError {
             } catch {

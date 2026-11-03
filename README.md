@@ -32,6 +32,18 @@ Spatial Studio, a native macOS 27 app.
 - Any file Core Audio reads goes straight in as a source
 - Place it in a room and render a binaural file, in the app or from code
 
+## Marathon Spatial Studio
+
+A native macOS 27 app built on the library: draw a room, place sources and sounding bodies, and hear the result on
+headphones, or export it to a binaural WAV. Everything it plays or exports is rendered by the library.
+See the [Studio README](apps/MarathonSpatialStudio/README.md).
+
+![A stone nave in Studio's plan view, with three sources, two blocks, traced early reflections drawn by order and the room's reverberation estimate per octave band](docs/images/studio-room.jpg)
+
+![The physics playground: a brass chime, a glass pane, a hardwood plank and a thunder sheet, each with its modes charted by frequency and decay](docs/images/studio-playground.jpg)
+
+![The material editor: wood panelling's absorption per octave band, scattering and transmission](docs/images/studio-materials.jpg)
+
 ## Requirements
 
 - macOS 27 or later

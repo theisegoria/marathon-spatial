@@ -111,6 +111,12 @@ struct PlaygroundView: View {
     }
 }
 
+/// What a body card's mode query depends on: the body itself and the engine configuration that holds it.
+private struct ModesQuery: Equatable {
+    let item: SoundingBody
+    let generation: Int
+}
+
 private struct BodyCard: View {
     var index: Int
     var item: SoundingBody
@@ -168,7 +174,8 @@ private struct BodyCard: View {
         }
         .padding(12)
         .glassPanel(cornerRadius: 18)
-        .task(id: item) { modes = await session.engine.modes(of: item.id) }
+        // Keyed on the configuration too: a body added a moment ago is not in the live engine until its configuration lands.
+        .task(id: ModesQuery(item: item, generation: session.configurationGeneration)) { modes = await session.engine.modes(of: item.id) }
     }
 
     /// Pressing strikes straight away, for the least latency. Moving on from there becomes a scrape.
