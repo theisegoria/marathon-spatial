@@ -15,6 +15,8 @@ Spatial Studio, a native macOS 27 app.
 - HRTF rendering with interpolation, plus your own SOFA files
 - Near-field, ISO 9613-1 air absorption, Doppler, directivity and per-source filters
 - Early reflections traced from live geometry, so moving doors and destruction change the sound
+- Hybrid late reverb in the listener's room: an energy field traced from the listener becomes a first-order ambisonic impulse
+  response for convolution, and a feedback network carries the tail on at the level the field reached
 - Late reverb per room, driven by real room volume and absorption, coupled through portals
 - Higher-order ambisonic beds decoded through the same HRTFs
 - Head tracking from any tracker you feed it
@@ -120,6 +122,7 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Reflection tracing on the CPU | In the tree, with CPU tests |
 | Reflection tracing with Metal ray tracing | In the tree. Not yet run |
 | Late reverb, room acoustics and portals | In the tree, with CPU tests |
+| Convolution reverb from the traced energy field, hybrid with the feedback network | In the tree, with CPU tests; on by default in Studio |
 | HRTF sets: analytic sphere, SOFA import, `.mshrtf` packs | In the tree, with CPU tests |
 | Source, voice and bed rendering, the engine | In the tree, with CPU tests |
 | Live Core Audio output | In the tree. Run on a Mac and listened to through Studio |

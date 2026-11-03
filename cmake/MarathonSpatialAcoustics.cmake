@@ -8,14 +8,17 @@ add_library(marathon_spatial_acoustics STATIC
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticScene.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticSimulator.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticsCApi.cpp
+    ${MARATHON_SPATIAL_ROOT}/src/acoustics/Convolver.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/CpuTraceBackend.cpp
+    ${MARATHON_SPATIAL_ROOT}/src/acoustics/EnergyField.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/LateReverb.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/MetalTraceBackend.mm
+    ${MARATHON_SPATIAL_ROOT}/src/acoustics/ReverbIr.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/RoomAcoustics.cpp)
 target_compile_features(marathon_spatial_acoustics PUBLIC cxx_std_20)
 target_include_directories(marathon_spatial_acoustics PUBLIC ${MARATHON_SPATIAL_ROOT}/include ${MARATHON_SPATIAL_ROOT}/src)
 set_source_files_properties(${MARATHON_SPATIAL_ROOT}/src/acoustics/MetalTraceBackend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-target_link_libraries(marathon_spatial_acoustics PUBLIC "-framework Foundation" "-framework Metal")
+target_link_libraries(marathon_spatial_acoustics PUBLIC "-framework Foundation" "-framework Metal" "-framework Accelerate")
 
 # Compiled ahead of time; pass the path to MetalTraceConfig::libraryPath.
 set(MARATHON_SPATIAL_ACOUSTICS_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/acoustic_trace.metallib CACHE INTERNAL "Compiled acoustic ray tracing kernels")

@@ -115,6 +115,8 @@ void LateReverbNetwork::prepare(const LateReverbConfig& config) {
         }
     }
     delayMemory_.assign(memory, 0.f);
+    hybrid_ = Hybrid{};
+    hybridMemory_.assign(config.maxHybridDelay > 0 ? config.maxHybridDelay + 1 : 0, 0.f);
 
     // Invert the band interaction: the response of every section at every band center, per dB of section gain.
     double matrix[kBandCount][kBandCount * 2] = {};
@@ -157,6 +159,36 @@ void LateReverbNetwork::reset() {
     for (Link& link : links_) {
         link.filter.z1 = {};
         link.filter.z2 = {};
+    }
+    std::fill(hybridMemory_.begin(), hybridMemory_.end(), 0.f);
+    hybrid_.filter.z1 = {};
+    hybrid_.filter.z2 = {};
+}
+
+void LateReverbNetwork::setHybrid(std::uint32_t room, std::uint32_t delaySamples, const Bands& gainDb) {
+    if (hybridMemory_.empty() || room >= rooms_.size()) room = kNone;
+    delaySamples = std::min<std::uint32_t>(delaySamples, hybridMemory_.empty() ? 0u : std::uint32_t(hybridMemory_.size() - 1));
+    if (room != hybrid_.room || delaySamples != hybrid_.delay) {
+        std::fill(hybridMemory_.begin(), hybridMemory_.end(), 0.f);
+        hybrid_.write = 0;
+        hybrid_.filter.z1 = {};
+        hybrid_.filter.z2 = {};
+    }
+    hybrid_.room = room;
+    hybrid_.delay = delaySamples;
+    if (room == kNone || gainDb == hybrid_.gainDb) return;
+    hybrid_.gainDb = gainDb;
+    float mean = 0.f, spread = 0.f;
+    for (float db : gainDb) mean += db / float(kBandCount);
+    for (float db : gainDb) spread = std::max(spread, std::fabs(db - mean));
+    hybrid_.flatGain = std::pow(10.f, mean / 20.f);
+    hybrid_.shaped = spread > 0.1f;
+    if (!hybrid_.shaped) return;
+    for (std::uint32_t s = 0; s < kReverbSections; ++s) {
+        float gain = 0.f;
+        for (std::size_t b = 0; b < kBandCount; ++b) gain += inverseResponse_[s][b] * (gainDb[b] - mean);
+        const Coefficients c = sectionCoefficients(s, std::clamp(gain, -30.f, 30.f), config_.sampleRate);
+        hybrid_.filter.sections[s] = {c.b0, c.b1, c.b2, c.a1, c.a2};
     }
 }
 
@@ -293,8 +325,22 @@ void LateReverbNetwork::process(const float* const* inputs, float* const* output
             if (changed) design(room);
             // A room with nothing in it costs nothing: once its tail has died it sleeps until something arrives.
             const float* input = inputs ? inputs[r] : nullptr;
+            std::uint32_t inputOffset = done;
+            if (r == hybrid_.room) {
+                // The room's own send, delayed and shaped. Its delay line runs even while the network sleeps, so nothing is lost.
+                const std::uint32_t size = std::uint32_t(hybridMemory_.size());
+                for (std::uint32_t n = 0; n < chunk; ++n) {
+                    hybridMemory_[hybrid_.write] = input ? input[done + n] : 0.f;
+                    const std::uint32_t read = (hybrid_.write + size - hybrid_.delay) % size;
+                    const float value = hybridMemory_[read] * hybrid_.flatGain;
+                    hybrid_.chunk[n] = hybrid_.shaped ? runFilter(hybrid_.filter, value) : value;
+                    hybrid_.write = (hybrid_.write + 1) % size;
+                }
+                input = hybrid_.chunk.data();
+                inputOffset = 0;
+            }
             bool driven = false;
-            for (std::uint32_t n = 0; n < chunk && !driven; ++n) driven = (input && input[done + n] != 0.f) || linkInput_[r][n] != 0.f;
+            for (std::uint32_t n = 0; n < chunk && !driven; ++n) driven = (input && input[inputOffset + n] != 0.f) || linkInput_[r][n] != 0.f;
             if (!driven && room.silentChunks >= kSleepChunks) {
                 if (left) std::fill_n(left, chunk, 0.f);
                 if (right) std::fill_n(right, chunk, 0.f);
@@ -302,7 +348,7 @@ void LateReverbNetwork::process(const float* const* inputs, float* const* output
                 roomSendOther_[r].fill(0.f);
                 continue;
             }
-            renderRoom(r, input, done, chunk, left, right);
+            renderRoom(r, input, inputOffset, chunk, left, right);
             float level = 0.f;
             for (std::uint32_t n = 0; n < chunk; ++n) level = std::max(level, std::fabs(roomSend_[r][n]));
             room.silentChunks = driven || level > kSleepLevel ? 0 : room.silentChunks + 1;

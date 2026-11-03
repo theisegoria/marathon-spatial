@@ -7,6 +7,11 @@
  *
  * Each frame: move instances and sources, call ms_acoustics_tick, then for each source call ms_acoustics_source_taps and hand the result to
  * ms_source_set_reflections and the source's eq values. Nothing here opens an audio device.
+ *
+ * The listener's room gets a hybrid late reverb. Paths traced from the listener measure the room's energy field: how much reflected energy
+ * arrives, from where and when, per octave band. That field becomes a first-order ambisonic impulse response which convolves the room's send
+ * for the first convolution_seconds, and the room's feedback network takes over from there at the level the field reached. The early part
+ * stays with the exact image-source taps. Other rooms use their feedback networks alone.
  */
 #ifndef MARATHON_SPATIAL_ACOUSTICS_H
 #define MARATHON_SPATIAL_ACOUSTICS_H
@@ -32,6 +37,8 @@ typedef struct ms_acoustics_config {
     float temperature_celsius;  /* Air absorption, ISO 9613-1. */
     float humidity_percent;
     uint32_t use_sabine;        /* Nonzero uses Sabine decay, zero Eyring. */
+    float convolution_seconds;  /* Length of the listener room's convolution reverb. 0 turns it off. Default 1.5. */
+    uint32_t energy_paths;      /* Paths tracing the listener's energy field, one segment each per tick. Default 384. */
 } ms_acoustics_config;
 
 /* Energy fractions per octave band, 62.5 Hz to 8 kHz. */
@@ -87,6 +94,16 @@ typedef struct ms_acoustic_room_view {
     float t60[MS_ACOUSTIC_BANDS];
 } ms_acoustic_room_view;
 
+/* The listener's traced energy field and the convolution reverb built from it. */
+typedef struct ms_acoustic_energy_view {
+    uint32_t active;                   /* A response from the field is in use. */
+    uint32_t room;                     /* The room it belongs to, or MS_ACOUSTIC_NONE. */
+    float paths;                       /* Effective number of traced paths behind it; old evidence fades over a few seconds. */
+    float seconds;                     /* Length of the convolution part. */
+    float t60[MS_ACOUSTIC_BANDS];      /* Fitted to the traced field; 0 where it holds too little to fit. */
+    float energy[MS_ACOUSTIC_BANDS];   /* Reflected energy of an impulse in the field, relative to the direct sound at 1 m. */
+} ms_acoustic_energy_view;
+
 void ms_acoustics_config_default(ms_acoustics_config* config);
 ms_acoustics* ms_acoustics_create(const ms_acoustics_config* config);
 void ms_acoustics_destroy(ms_acoustics* acoustics);
@@ -115,6 +132,9 @@ uint32_t ms_acoustics_source_add(ms_acoustics* acoustics, ms_vec3 position, floa
 void ms_acoustics_source_set(ms_acoustics* acoustics, uint32_t source, ms_vec3 position, float radius);
 void ms_acoustics_source_remove(ms_acoustics* acoustics, uint32_t source);
 void ms_acoustics_set_listener(ms_acoustics* acoustics, ms_vec3 position);
+/* Which way the listener faces, as for ms_listener_set_pose. Only the stereo decoding of the convolution reverb uses it; the ambisonic
+   output of ms_acoustics_reverb_process_ambisonic stays in the world frame. Default: forward -Z, up +Y. */
+void ms_acoustics_set_listener_orientation(ms_acoustics* acoustics, ms_vec3 forward, ms_vec3 up);
 
 /* Takes finished rays, refreshes everything analytic, publishes, and queues the next rays. Never waits for the GPU. */
 void ms_acoustics_tick(ms_acoustics* acoustics, float seconds);
@@ -126,6 +146,7 @@ void ms_acoustics_source_view_get(const ms_acoustics* acoustics, uint32_t source
 /* paths must hold MS_ACOUSTIC_MAX_PORTAL_PATHS. */
 void ms_acoustics_source_portal_paths(const ms_acoustics* acoustics, uint32_t source, ms_acoustic_portal_path* paths);
 void ms_acoustics_room_view_get(const ms_acoustics* acoustics, uint32_t room, ms_acoustic_room_view* view);
+void ms_acoustics_energy_view_get(const ms_acoustics* acoustics, ms_acoustic_energy_view* view);
 /* The room of a source, or the listener with MS_ACOUSTIC_NONE as source. */
 uint32_t ms_acoustics_room_of(const ms_acoustics* acoustics, uint32_t source);
 
@@ -135,6 +156,11 @@ ms_status ms_acoustics_reverb_prepare(ms_acoustics* acoustics);
 /* Render thread. inputs[room] is the mono send into that room or NULL; left[room] and right[room] are outputs or NULL. Arrays hold one entry per
    room. Output is pressure relative to free field at 1 m, so the send level is 1 for a physical result. */
 void ms_acoustics_reverb_process(ms_acoustics* acoustics, const float* const* inputs, float* const* left, float* const* right, uint32_t frames);
+/* As ms_acoustics_reverb_process, but the listener room's convolution reverb leaves as first-order ambisonics in ambisonic[0..3] (ACN/SN3D
+   AmbiX in the world frame, for a world-locked ms_bed, which decodes it through the HRTF and follows the head) instead of being decoded into
+   that room's left and right. ambisonic entries may be NULL. */
+void ms_acoustics_reverb_process_ambisonic(ms_acoustics* acoustics, const float* const* inputs, float* const* left, float* const* right,
+                                           float* const* ambisonic, uint32_t frames);
 
 #ifdef __cplusplus
 }

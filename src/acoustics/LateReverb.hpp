@@ -26,6 +26,8 @@ struct LateReverbConfig {
     std::vector<float> meanDelaySeconds;
     std::uint32_t rooms = kMaxRooms;
     std::uint32_t links = kMaxRoomLinks;
+    // Longest delay setHybrid may ask for, in samples. 0 means no hybrid room.
+    std::uint32_t maxHybridDelay = 0;
 };
 
 class LateReverbNetwork {
@@ -40,6 +42,11 @@ public:
     void process(const float* const* inputs, float* const* outputsLeft, float* const* outputsRight, std::uint32_t frames);
 
     void reset();
+
+    // Hybrid with a convolution reverb: room's own input reaches its network `delaySamples` later and scaled per band by gainDb, so the
+    // convolution owns the start of the tail and the network carries on from where the response fades. Inputs injected through portals
+    // are not delayed. kNone turns it off. Real time: call from the render thread before process(); a changed room clears the delay.
+    void setHybrid(std::uint32_t room, std::uint32_t delaySamples, const Bands& gainDb);
 
     // Delay memory in one room's network, in samples.
     std::uint32_t totalDelay(std::uint32_t room) const;
@@ -87,6 +94,18 @@ private:
     std::vector<std::array<float, kReverbChunk>> roomSend_, roomSendOther_;
     std::vector<std::array<float, kReverbChunk>> linkInput_;
     std::array<std::array<float, kBandCount>, kBandCount> inverseResponse_{};
+
+    struct Hybrid {
+        std::uint32_t room = kNone;
+        std::uint32_t delay = 0;
+        std::uint32_t write = 0;
+        Bands gainDb{};
+        float flatGain = 1.f;
+        bool shaped = false;
+        Filter filter;
+        std::array<float, kReverbChunk> chunk{};
+    } hybrid_;
+    std::vector<float> hybridMemory_;
 };
 
 }  // namespace mspatial::acoustics

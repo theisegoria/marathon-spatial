@@ -75,10 +75,18 @@ public struct MeasuredRoom: Sendable, Equatable {
     public var surfaceArea: Double
     /// One per `AcousticMaterial.bandsHz`.
     public var t60Seconds: [Double]
-    public init(volume: Double, surfaceArea: Double, t60Seconds: [Double]) {
-        self.volume = volume; self.surfaceArea = surfaceArea; self.t60Seconds = t60Seconds
+    /// Fitted to the energy field traced from the listener, which drives the convolution reverb. Zero in a band the field cannot fit yet;
+    /// empty when the field is off.
+    public var tracedT60Seconds: [Double]
+    public init(volume: Double, surfaceArea: Double, t60Seconds: [Double], tracedT60Seconds: [Double] = []) {
+        self.volume = volume; self.surfaceArea = surfaceArea; self.t60Seconds = t60Seconds; self.tracedT60Seconds = tracedT60Seconds
     }
     public var midSeconds: Double { (t60Seconds[3] + t60Seconds[4]) / 2 }
+    /// Nil until the traced field fits both mid bands.
+    public var tracedMidSeconds: Double? {
+        guard tracedT60Seconds.count > 4, tracedT60Seconds[3] > 0, tracedT60Seconds[4] > 0 else { return nil }
+        return (tracedT60Seconds[3] + tracedT60Seconds[4]) / 2
+    }
 }
 
 /// Triangles and materials as flat arrays, ready to pass through a C boundary.

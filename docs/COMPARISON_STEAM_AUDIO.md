@@ -30,7 +30,7 @@ The right-hand column states what this project intends and whether it has landed
 | HRTF rendering | Built-in HRTF or a custom SOFA file ([HRTF][sa-hrtf]) | A choice of HRTF sets |
 | Direct path | Distance attenuation, air absorption, directivity, occlusion, transmission ([simulation][sa-sim]) | The same set |
 | Ambisonics | Encode, rotate, decode to binaural or speakers, with order set at creation ([decode effect][sa-ambi]) | Higher-order beds decoded through the same HRTFs |
-| Reverb driven by geometry | Convolution, parametric, hybrid and TrueAudio Next ([`phonon.h`][sa-header]) | Early reflections plus a late reverb per room |
+| Reverb driven by geometry | Convolution, parametric, hybrid and TrueAudio Next ([`phonon.h`][sa-header]) | Exact early reflections, convolution from the listener's traced energy field in first-order ambisonics, and a parametric network per room carrying the tail: hybrid |
 | Head tracking | The application passes listener orientation ([decode effect][sa-ambi]) | The same, and where the headphones have motion sensors the app reads them |
 | Custom ray tracing | Callback scene type ([scene][sa-scene]) | Scenes passed as plain data; ray tracing behind its own interface |
 | Occlusion | Raycast or volumetric ([simulation][sa-sim]) | Traced against live geometry |
@@ -58,6 +58,8 @@ The right-hand column states what this project intends and whether it has landed
   convention and `Data.Delay` of 0 ([guide][sa-guide-sofa]).
 - **HRTF interpolation.** Steam Audio offers nearest and bilinear ([guide][sa-guide-sofa]).
 - **GPU convolution.** Steam Audio's TrueAudio Next path is [Windows x64 only][sa-build].
+- **Where convolution runs.** Steam Audio can convolve per source. Here one listener-centred response serves every source in the listener's
+  room, which costs one convolution however many sources there are, while each source keeps its own exact early reflections.
 
 [sa-repo]: https://github.com/ValveSoftware/steam-audio
 [sa-licence]: https://github.com/ValveSoftware/steam-audio/blob/master/LICENSE.md

@@ -97,6 +97,9 @@ Simulator::Simulator(Scene& scene, TraceBackend& backend, const SimulatorConfig&
     config_.sequenceCacheSize = std::max<std::uint32_t>(config_.sequenceCacheSize, 64);
     sequences_.resize(config_.sequenceCacheSize);
     sequenceIndex_.reserve(config_.sequenceCacheSize * 2);
+    config_.energy.speedOfSound = config_.speedOfSound;
+    config_.energy.air = config_.air;
+    energy_.configure(config_.energy);
 }
 
 std::uint32_t Simulator::addSource(const SourceDesc& desc) {
@@ -129,6 +132,7 @@ void Simulator::tick(float dt) {
         consume(*batch);
         backend_.release(batch);
     }
+    energy_.age(dt);
     if (TraceBatch* batch = backend_.acquireBatch()) {
         prepare(*batch);
         backend_.submit(batch);
@@ -162,6 +166,7 @@ void Simulator::prepare(TraceBatch& batch) {
     jobs.portals.clear();
     jobs.probes.clear();
     jobs.probeDirections.clear();
+    jobs.energy.clear();
     const TraceCapacity& capacity = backend_.capacity();
     const float eps = backend_.selfHitOffset();
 
@@ -217,6 +222,16 @@ void Simulator::prepare(TraceBatch& batch) {
             const float span = length(line);
             batch.layeredRays[batch.layeredCount++] = segment(listener_, line / span, eps, span);
         }
+    }
+
+    // The listener's energy field: one segment for each idle path, within half of what is left.
+    if (energy_.enabled()) {
+        if (published_) {
+            const std::uint32_t room = published_->listenerRoom;
+            energy_.setRoom(room);
+            energy_.setRoomVolume(room != kNone && room < published_->roomCount ? published_->rooms[room].volume : 0.f);
+        }
+        energy_.issue(batch, (capacity.closestRays - batch.closestCount) / 2, listener_, eps, jobs.energy);
     }
 
     // Early paths share what is left. Each source gets an equal quota, and any it leaves unused passes to the next: the start rotates, so a tight
@@ -316,8 +331,9 @@ void Simulator::prepare(TraceBatch& batch) {
 }
 
 void Simulator::consume(const TraceBatch& batch) {
-    if (batch.failed) return;
     const Jobs& jobs = jobs_[batch.slot];
+    energy_.consume(scene_, batch, jobs.energy, listener_);  // Also frees the paths of a failed batch.
+    if (batch.failed) return;
     consumeDiscovery(batch, jobs);
     consumePaths(batch, jobs);
     consumeDirect(batch, jobs);

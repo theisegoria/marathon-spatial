@@ -12,6 +12,7 @@
 
 #include "acoustics/AcousticSnapshot.hpp"
 #include "acoustics/AcousticTrace.hpp"
+#include "acoustics/EnergyField.hpp"
 #include "acoustics/RoomAcoustics.hpp"
 
 #include <array>
@@ -63,6 +64,9 @@ struct SimulatorConfig {
     float replacementMargin = 1.25f;  // A new path must be this much stronger in energy to retire the weakest one.
     std::uint32_t missTolerance = 2;  // Consecutive failed validations before a path fades.
     std::uint32_t sequenceCacheSize = 4096;
+    // The listener's traced energy field, for convolution reverb. paths = 0 leaves it off; its rays take at most half of what the
+    // direct and room rays leave, so early reflections always keep a share.
+    EnergyTracerConfig energy{.paths = 0};
 };
 
 class Simulator {
@@ -83,6 +87,8 @@ public:
     // The snapshot the last tick published, for the thread that calls tick. Stays intact until tick runs twice more; null before the first tick.
     const AcousticSnapshot* lastPublished() const { return published_; }
     std::uint32_t issuedClosestRays() const { return issuedClosest_; }
+    // The listener's energy field, read on the thread that calls tick.
+    const EnergyTracer& energyTracer() const { return energy_; }
     std::size_t knownSequences() const { return sequenceCount_; }
 
 private:
@@ -125,6 +131,7 @@ private:
         std::vector<DirectJob> direct;
         std::vector<SampleJob> portals, probes;
         std::vector<Vec3> probeDirections;
+        std::vector<EnergyJob> energy;
         std::uint32_t discovery = 0;
     };
     struct ProbeSample {
@@ -175,6 +182,7 @@ private:
     std::vector<float> portalDistance_;
     std::vector<std::uint32_t> portalPrevious_;
     std::vector<std::uint8_t> portalDone_;
+    EnergyTracer energy_;
     SnapshotExchange<AcousticSnapshot> exchange_;
     const AcousticSnapshot* published_ = nullptr;
 };

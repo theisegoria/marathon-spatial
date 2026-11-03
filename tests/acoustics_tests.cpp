@@ -1,5 +1,8 @@
 // CPU-only acoustics tests against analytic rooms. Everything renders to memory; nothing here touches an audio device or the GPU.
 #include "acoustics/AcousticSimulator.hpp"
+#include "acoustics/Convolver.hpp"
+#include "acoustics/EnergyField.hpp"
+#include "acoustics/ReverbIr.hpp"
 #include "acoustics/LateReverb.hpp"
 #include "marathon_spatial/marathon_spatial_acoustics.h"
 
@@ -938,6 +941,357 @@ void smallRayBudgetStaysBoundedAndFair() {
     check(weakest >= 6, "every source keeps at least its first-order paths under a tight budget");
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Hybrid convolution reverb from the traced energy field.
+
+double correlation(const std::vector<float>& a, const std::vector<float>& b, std::size_t from, std::size_t to) {
+    double ab = 0, aa = 0, bb = 0;
+    for (std::size_t i = from; i < to; ++i) {
+        ab += double(a[i]) * b[i];
+        aa += double(a[i]) * a[i];
+        bb += double(b[i]) * b[i];
+    }
+    return aa > 0 && bb > 0 ? ab / std::sqrt(aa * bb) : 0.0;
+}
+
+void convolverMatchesDirectConvolution() {
+    constexpr std::uint32_t kBlock = 64, kChannels = 3, kIr = 700, kLength = 4000;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> gauss;
+    std::vector<std::vector<float>> irA(kChannels, std::vector<float>(kIr)), irB = irA;
+    for (auto& channel : irA)
+        for (float& v : channel) v = gauss(rng);
+    for (auto& channel : irB)
+        for (float& v : channel) v = gauss(rng) * 0.5f;
+    std::vector<float> input(kLength);
+    for (float& v : input) v = gauss(rng);
+    PartitionedConvolver convolver;
+    convolver.prepare(kBlock, 1024, kChannels);
+    const float* a[kChannels] = {irA[0].data(), irA[1].data(), irA[2].data()};
+    const float* b[kChannels] = {irB[0].data(), irB[1].data(), irB[2].data()};
+    check(convolver.stage(a, kIr), "first response stages");
+    check(!convolver.stage(b, kIr), "a second response waits until the first is taken");
+    std::vector<std::vector<float>> out(kChannels, std::vector<float>(kLength));
+    // Odd chunk sizes, so blocks straddle calls. The second response is staged mid-way.
+    const std::uint32_t chunks[] = {1, 37, 64, 129, 500, 3};
+    std::uint32_t done = 0, turn = 0, swapAt = 0;
+    while (done < kLength) {
+        const std::uint32_t n = std::min(chunks[turn++ % 6], kLength - done);
+        float* outs[kChannels] = {out[0].data() + done, out[1].data() + done, out[2].data() + done};
+        convolver.process(input.data() + done, outs, n);
+        done += n;
+        if (swapAt == 0 && done >= 2000 && convolver.stage(b, kIr)) swapAt = done;
+    }
+    const auto direct = [&](const std::vector<float>& h, std::uint32_t n) {
+        double sum = 0;
+        for (std::uint32_t k = 0; k < kIr && k <= n; ++k) sum += double(h[k]) * input[n - k];
+        return sum;
+    };
+    double worstBefore = 0, worstAfter = 0;
+    for (std::uint32_t c = 0; c < kChannels; ++c) {
+        // The first response fades in from silence over the first block it plays in.
+        for (std::uint32_t n = 2 * kBlock; n < 1900; ++n) worstBefore = std::max(worstBefore, std::fabs(out[c][n] - direct(irA[c], n - kBlock)));
+        // One block to pick the new response up at a block boundary, one to crossfade.
+        for (std::uint32_t n = swapAt + 3 * kBlock; n < kLength; ++n) worstAfter = std::max(worstAfter, std::fabs(out[c][n] - direct(irB[c], n - kBlock)));
+    }
+    near(worstBefore, 0.0, 2e-3, "partitioned convolution equals direct convolution");
+    near(worstAfter, 0.0, 2e-3, "after a swap it equals the new response over the whole history");
+    // Through the hand-over every sample lies between what the old and the new response give: a blend, never a step outside both.
+    double outside = 0;
+    for (std::uint32_t n = swapAt; n < swapAt + 3 * kBlock; ++n) {
+        const double oldValue = direct(irA[0], n - kBlock), newValue = direct(irB[0], n - kBlock);
+        const double lo = std::min(oldValue, newValue), hi = std::max(oldValue, newValue);
+        outside = std::max(outside, std::max(lo - out[0][n], out[0][n] - hi));
+    }
+    near(std::max(outside, 0.0), 0.0, 2e-3, "the swap blends the old and new responses");
+}
+
+void convolverIsRealTimeSafe() {
+    PartitionedConvolver convolver;
+    convolver.prepare(256, 48000, kAmbisonicChannels);
+    std::vector<float> ir(48000, 0.f);
+    ir[300] = 1.f;
+    const float* irs[kAmbisonicChannels] = {ir.data(), ir.data(), ir.data(), ir.data()};
+    std::vector<float> in(512, 0.1f), out(4 * 512);
+    float* outs[kAmbisonicChannels] = {out.data(), out.data() + 512, out.data() + 1024, out.data() + 1536};
+    const long before = allocationCount.load();
+    for (int block = 0; block < 200; ++block) {
+        if (block % 20 == 0) convolver.stage(irs, 48000);  // Responses arriving while it runs.
+        convolver.process(in.data(), outs, 512);
+    }
+    near(double(allocationCount.load() - before), 0.0, 0.0, "no allocation in stage() or process()");
+}
+
+// A 10 x 8 x 4 m box, alpha 0.2 and scattering 0.5 everywhere: close enough to diffuse for Eyring.
+struct TracedBox {
+    Scene scene;
+    std::unique_ptr<TraceBackend> backend = makeCpuTraceBackend();
+    std::unique_ptr<Simulator> simulator;
+    std::uint32_t room = kNone;
+    TracedBox(float seconds, std::uint32_t paths) {
+        const std::uint32_t wall = scene.addMaterial(flat(0.2f, 0.5f));
+        const MeshData mesh = boxInside(vec3(0, 0, 0), vec3(10, 8, 4), {wall, wall, wall, wall, wall, wall});
+        scene.addInstance(mesh.add(scene), Transform{});
+        RoomDesc desc;
+        desc.bounds = {Box{vec3(0, 0, 0), vec3(10, 8, 4)}};
+        desc.probe = vec3(5, 4, 2);
+        room = scene.addRoom(desc);
+        SimulatorConfig config;
+        config.air = noAir();
+        config.energy.paths = paths;
+        config.energy.seconds = seconds;
+        simulator = std::make_unique<Simulator>(scene, *backend, config);
+        simulator->setListener(vec3(3.7f, 4.6f, 1.7f));
+    }
+};
+
+void energyFieldMatchesEyring() {
+    TracedBox box(1.2f, 512);
+    for (int i = 0; i < 900; ++i) box.simulator->tick(1.f / 60.f);
+    EnergyField field;
+    box.simulator->energyTracer().read(field);
+    check(field.room == box.room, "the field belongs to the listener's room");
+    const double V = 320, S = 304, alpha = 0.2, c = 343;
+    const double eyring = 24.0 * std::log(10.0) * V / (c * -S * std::log(1.0 - alpha));
+    const Bands t60 = field.t60();
+    near(t60[3], eyring, eyring * 0.15, "traced T60 at 500 Hz against Eyring");
+    near(t60[6], eyring, eyring * 0.15, "traced T60 at 4 kHz against Eyring");
+    // Reflected energy of an impulse against the diffuse-field estimate 16 pi (1 - alpha) / A, both relative to the direct sound at 1 m, for the
+    // part the field covers.
+    double total = 0;
+    for (std::uint32_t i = 0; i < field.bins; ++i) total += field.band(3, i);
+    const double A = -S * std::log(1.0 - alpha);
+    const double covered = 1.0 - std::exp(-c * A / (4 * V) * 1.2);
+    const double expected = 16 * std::numbers::pi * (1 - alpha) / A * covered;
+    near(10 * std::log10(total / expected), 0.0, 2.0, "traced reflected energy against 16 pi (1 - alpha) / A, dB");
+    // Late in the tail the field is diffuse: no direction holds much more than its share.
+    double most = 0, least = INFINITY;
+    for (std::uint32_t d = 0; d < kFieldDirections; ++d) {
+        double sum = 0;
+        for (std::uint32_t i = field.bins / 3; i < field.bins; ++i) sum += field.at(d, 3, i);
+        most = std::max(most, sum);
+        least = std::min(least, sum);
+    }
+    check(most < 2.5 * least, "the late field arrives evenly from every direction");
+    std::printf("  ok %.0f paths, %llu segments traced; late direction spread %.2f\n", field.paths,
+                (unsigned long long)box.simulator->energyTracer().segmentsTraced(), most / least);
+}
+
+void energyFieldFollowsTheRoom() {
+    TracedBox box(1.0f, 256);
+    for (int i = 0; i < 200; ++i) box.simulator->tick(1.f / 60.f);
+    box.simulator->setListener(vec3(20, 20, 20));  // Outside every room.
+    for (int i = 0; i < 3; ++i) box.simulator->tick(1.f / 60.f);
+    EnergyField field;
+    box.simulator->energyTracer().read(field);
+    check(field.room == kNone && field.paths < 2000.0, "leaving the room starts the field again");
+}
+
+void responseMatchesItsField() {
+    // A synthetic field: isotropic, the same exponential decay in every band.
+    EnergyField field;
+    field.bins = 100;
+    field.binSeconds = 0.01f;
+    field.room = 0;
+    field.paths = 1e6;
+    field.energy.assign(std::size_t(kFieldDirections) * kBandCount * field.bins, 0.f);
+    const float rate = 13.8f;  // 0.5 s T60.
+    for (std::uint32_t d = 0; d < kFieldDirections; ++d)
+        for (std::uint32_t b = 0; b < kBandCount; ++b)
+            for (std::uint32_t i = 0; i < field.bins; ++i)
+                field.at(d, b, i) = 0.01f / float(kFieldDirections) * std::exp(-rate * (float(i) + 0.5f) * field.binSeconds);
+    ReverbIrSynth synth;
+    synth.prepare(48000.f, 48000);
+    std::vector<float> store(std::size_t(kAmbisonicChannels) * synth.maxSamples());
+    float* out[kAmbisonicChannels];
+    for (std::uint32_t c = 0; c < kAmbisonicChannels; ++c) out[c] = store.data() + std::size_t(c) * synth.maxSamples();
+    ReverbIrShape shape;
+    shape.fadeOutStart = 0.9f;
+    shape.fadeOutEnd = 1.0f;
+    const std::uint32_t samples = synth.build(field, shape, out);
+    check(samples == 48000, "the response is as long as asked");
+    // Energy of W in 50 ms windows against the field's.
+    double worst = 0;
+    for (std::uint32_t w = 1; w < 16; ++w) {
+        double ir = 0, expected = 0;
+        for (std::uint32_t n = w * 2400; n < (w + 1) * 2400; ++n) ir += double(out[0][n]) * out[0][n];
+        // The bands share an impulse's energy, so a field the same in every band gives a response of that one band's energy.
+        for (std::uint32_t i = w * 5; i < (w + 1) * 5; ++i) expected += field.band(3, i);
+        worst = std::max(worst, std::fabs(10 * std::log10(ir / expected)));
+    }
+    near(worst, 0.0, 1.0, "response energy follows the field, worst 50 ms window in dB");
+    // Diffuse: the first-order channels carry a third of W's energy each and are uncorrelated with it and each other.
+    std::vector<float> w(out[0], out[0] + samples), y(out[1], out[1] + samples), z(out[2], out[2] + samples), x(out[3], out[3] + samples);
+    double ew = 0, ex = 0;
+    for (std::uint32_t n = 0; n < 24000; ++n) {
+        ew += double(w[n]) * w[n];
+        ex += double(x[n]) * x[n];
+    }
+    near(ex / ew, 1.0 / 3.0, 0.06, "diffuse field: X holds a third of W's energy");
+    double worstCorrelation = 0;
+    for (const auto* pair : {&x, &y, &z}) worstCorrelation = std::max(worstCorrelation, std::fabs(correlation(w, *pair, 0, 24000)));
+    worstCorrelation = std::max(worstCorrelation, std::fabs(correlation(x, y, 0, 24000)));
+    near(worstCorrelation, 0.0, 0.15, "diffuse field: ambisonic channels uncorrelated");
+
+    // Everything from one direction: the response points there.
+    std::fill(field.energy.begin(), field.energy.end(), 0.f);
+    for (std::uint32_t b = 0; b < kBandCount; ++b)
+        for (std::uint32_t i = 0; i < field.bins; ++i) field.at(5, b, i) = 0.01f * std::exp(-rate * (float(i) + 0.5f) * field.binSeconds);
+    synth.build(field, shape, out);
+    double wx = 0, ww = 0;
+    for (std::uint32_t n = 0; n < 24000; ++n) {
+        wx += double(out[3][n]) * out[0][n];
+        ww += double(out[0][n]) * out[0][n];
+    }
+    const Vec3 u = fieldDirections()[5];
+    // The uniform prior keeps 10 % spread over every direction, so the mean direction cosine is 90 % of the direction's.
+    near(wx / ww, -u.z * 0.9, 0.08, "one direction: X follows it");
+    // A constant field: the response's power is the field's, with no decay to bias anything and the bands' powers simply adding.
+    std::fill(field.energy.begin(), field.energy.end(), 0.001f / float(kFieldDirections));
+    synth.build(field, shape, out);
+    double flatEnergy = 0;
+    for (std::uint32_t n = 4800; n < 43200; ++n) flatEnergy += double(out[0][n]) * out[0][n];
+    near(10 * std::log10(flatEnergy / (0.001 * 80)), 0.0, 0.5, "constant field: response power equals the field's, dB");
+}
+
+void hybridDelaysAndScalesTheSend() {
+    // The network's own send through the hybrid: the same tail, later and quieter by exactly the gain.
+    const auto render = [](bool hybrid, std::vector<float>& left) {
+        LateReverbConfig config;
+        config.rooms = 1;
+        config.links = 0;
+        config.maxHybridDelay = 48000;
+        LateReverbNetwork reverb;
+        reverb.prepare(config);
+        AcousticSnapshot& snapshot = *reverbSnapshot();
+        setRoom(snapshot, 0, 320.f, uniformBands(0.76f));
+        reverb.apply(snapshot);
+        if (hybrid) reverb.setHybrid(0, 9600, uniformBands(-20.f));
+        std::vector<float> in(left.size(), 0.f), right(left.size());
+        in[0] = 1.f;
+        for (std::size_t done = 0; done < in.size(); done += 480) {
+            const float* inputs[] = {in.data() + done};
+            float* lefts[] = {left.data() + done};
+            float* rights[] = {right.data() + done};
+            reverb.process(inputs, lefts, rights, 480);
+        }
+    };
+    std::vector<float> plain(96000), delayed(96000);
+    render(false, plain);
+    render(true, delayed);
+    double before = 0, a = 0, b = 0;
+    for (std::size_t n = 0; n < 9600; ++n) before += double(delayed[n]) * delayed[n];
+    for (std::size_t n = 0; n < 48000; ++n) {
+        a += double(plain[n]) * plain[n];
+        b += double(delayed[n + 9600]) * delayed[n + 9600];
+    }
+    near(before, 0.0, 1e-12, "nothing comes out before the hybrid delay");
+    near(10 * std::log10(b / a), -20.0, 0.3, "the delayed tail is the plain tail at the hybrid gain, dB");
+    double e0 = 0;
+    for (std::size_t n = 0; n < 1920; ++n) e0 += double(plain[n]) * plain[n];
+    // Initial energy rate 4 pi c / V a second, less the build-up over the first line delays.
+    std::printf("    network first 40 ms: %.2f dB against 4 pi c / V: %.2f dB\n", 10 * std::log10(e0), 10 * std::log10(4 * std::numbers::pi * 343 / 320 * 0.04));
+}
+
+void capiHybridReverb() {
+    ms_acoustics_config config;
+    ms_acoustics_config_default(&config);
+    config.convolution_seconds = 1.f;
+    ms_acoustics* acoustics = ms_acoustics_create(&config);
+    ms_acoustic_material material{};
+    for (std::size_t b = 0; b < kBandCount; ++b) {
+        material.absorption[b] = 0.2f;
+        material.scattering[b] = 0.5f;
+    }
+    const std::uint32_t wall = ms_acoustics_material_add(acoustics, &material);
+    const MeshData mesh = boxInside(vec3(0, 0, 0), vec3(10, 8, 4), {wall, wall, wall, wall, wall, wall});
+    const std::uint32_t meshId = ms_acoustics_mesh_add(acoustics, mesh.positions.data(), std::uint32_t(mesh.positions.size() / 3), mesh.indices.data(),
+                                                       std::uint32_t(mesh.indices.size()), mesh.materials.data());
+    ms_acoustics_instance_add(acoustics, meshId, nullptr);
+    const ms_acoustic_box bounds{{0, 0, 0}, {10, 8, 4}};
+    ms_acoustic_room room{};
+    room.bounds = &bounds;
+    room.bound_count = 1;
+    room.probe = {5, 4, 2};
+    const std::uint32_t roomId = ms_acoustics_room_add(acoustics, &room);
+    ms_acoustics_set_listener(acoustics, {3.7f, 4.6f, 1.7f});
+    ms_acoustics_set_listener_orientation(acoustics, {0, 0, -1}, {0, 1, 0});
+    for (int i = 0; i < 60; ++i) ms_acoustics_tick(acoustics, 1.f / 60.f);
+    check(ms_acoustics_reverb_prepare(acoustics) == MS_OK, "hybrid reverb prepares");
+    // The render thread runs alongside: it takes each new response as it comes.
+    std::vector<float> silence(4800, 0.f), sink(4800);
+    for (int i = 0; i < 900; ++i) {
+        ms_acoustics_tick(acoustics, 1.f / 60.f);
+        const float* quiet[] = {silence.data()};
+        float* out[] = {sink.data()};
+        ms_acoustics_reverb_process(acoustics, quiet, out, out, 800);
+    }
+    ms_acoustic_energy_view view;
+    ms_acoustics_energy_view_get(acoustics, &view);
+    check(view.active && view.room == roomId, "a response from the traced field is in use");
+    const double eyring = 24.0 * std::log(10.0) * 320 / (343 * -304 * std::log(0.8));
+    near(view.t60[3], eyring, eyring * 0.2, "energy view T60 at 500 Hz");
+
+    // An impulse through the whole hybrid: convolution, then the network from the end of the response at the level the field reached.
+    const std::uint32_t frames = 48000 * 2;
+    std::vector<float> in(frames, 0.f), left(frames), right(frames);
+    in[0] = 1.f;
+    const float* inputs[] = {in.data()};
+    float* lefts[] = {left.data()};
+    float* rights[] = {right.data()};
+    for (std::uint32_t done = 0; done < frames; done += 480) {
+        const float* i2[] = {in.data() + done};
+        float* l2[] = {left.data() + done};
+        float* r2[] = {right.data() + done};
+        ms_acoustics_reverb_process(acoustics, i2, l2, r2, 480);
+    }
+    (void)inputs;
+    (void)lefts;
+    (void)rights;
+    // Energy decay in 40 ms windows: no step at the hand-over, and the slope of the room throughout.
+    std::vector<double> db;
+    for (std::uint32_t w = 0; w < frames / 1920; ++w) {
+        double e = 0;
+        for (std::uint32_t n = w * 1920; n < (w + 1) * 1920; ++n) e += double(left[n]) * left[n] + double(right[n]) * right[n];
+        db.push_back(10 * std::log10(std::max(e, 1e-30)));
+    }
+    for (std::size_t w = 0; w < 34; ++w) std::printf("    %zu: %.1f dB  step %.1f\n", w, db[w], w ? db[w] - db[w - 1] : 0.0);
+    double worstStep = 0;
+    const double expectedStep = 60.0 / eyring * 0.04;
+    for (std::size_t w = 4; w + 1 < db.size() && w < 32; ++w) worstStep = std::max(worstStep, std::fabs(db[w + 1] - db[w] + expectedStep));
+    near(worstStep, 0.0, 3.0, "decay in 40 ms windows departs from the room's slope by at most, dB");
+    // Stereo from the ambisonic response: the late tail is decorrelated between the ears.
+    near(correlation(left, right, 4800, 38400), 0.0, 0.35, "late tail decorrelated between the ears");
+
+    std::vector<float> w(frames), x(frames), y(frames), z(frames);
+    float* foa[] = {w.data(), y.data(), z.data(), x.data()};
+    std::fill(left.begin(), left.end(), 0.f);
+    for (std::uint32_t done = 0; done < frames; done += 480) {
+        const float* i2[] = {in.data() + done};
+        float* l2[] = {left.data() + done};
+        float* r2[] = {right.data() + done};
+        float* a2[] = {foa[0] + done, foa[1] + done, foa[2] + done, foa[3] + done};
+        ms_acoustics_reverb_process_ambisonic(acoustics, i2, l2, r2, a2, 480);
+    }
+    double ambisonicEnergy = 0;
+    for (float v : w) ambisonicEnergy += double(v) * v;
+    check(ambisonicEnergy > 0.0, "the ambisonic output carries the convolution");
+
+    // Real time: no allocation while rendering, with new responses arriving; and what it costs.
+    std::vector<float> block(480, 0.01f), sinkLeft(480), sinkRight(480);
+    const float* blockInputs[] = {block.data()};
+    float* blockLeft[] = {sinkLeft.data()};
+    float* blockRight[] = {sinkRight.data()};
+    for (int i = 0; i < 40; ++i) ms_acoustics_tick(acoustics, 1.f / 60.f);  // A response is waiting.
+    const long before = allocationCount.load();
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 1000; ++i) ms_acoustics_reverb_process(acoustics, blockInputs, blockLeft, blockRight, 480);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    near(double(allocationCount.load() - before), 0.0, 0.0, "no allocation in the hybrid render");
+    std::printf("  measured: hybrid reverb, 1 s ambisonic response, 10 s of audio in %.3f s, %.0f x real time\n", seconds, 10.0 / seconds);
+    ms_acoustics_destroy(acoustics);
+}
 }  // namespace
 
 void* operator new(std::size_t size) {
@@ -968,6 +1322,13 @@ int main() {
     snapshotExchangeNeverTears();
     smallRayBudgetStaysBoundedAndFair();
     capiDrivesTheWholePath();
+    convolverMatchesDirectConvolution();
+    convolverIsRealTimeSafe();
+    energyFieldMatchesEyring();
+    energyFieldFollowsTheRoom();
+    responseMatchesItsField();
+    hybridDelaysAndScalesTheSend();
+    capiHybridReverb();
     measuredCost();
     std::printf(failures ? "\n%d FAILED\n" : "\nall passed\n", failures);
     return failures ? 1 : 0;

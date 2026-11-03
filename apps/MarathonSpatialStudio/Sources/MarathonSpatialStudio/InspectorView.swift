@@ -93,12 +93,21 @@ private struct RoomInspector: View {
             LabeledContent("Mid RT60 (Eyring)") { Text("\(estimate.midSeconds, format: .number.precision(.fractionLength(2))) s") }
             if let measured {
                 LabeledContent("Mid RT60 (library)") { Text("\(measured.midSeconds, format: .number.precision(.fractionLength(2))) s") }
+                if let traced = measured.tracedMidSeconds {
+                    LabeledContent("Mid RT60 (traced)") { Text("\(traced, format: .number.precision(.fractionLength(2))) s") }
+                }
             }
-            Text("Statistical estimate from volume and absorption, not a measurement of the render.")
+            Text("Statistical estimate from volume and absorption. The traced figure comes from the energy field the convolution reverb is built from, and settles over a few seconds after the room changes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .task(id: project.room) { measured = await session.engine.measuredRoom() }
+        .task(id: project.room) {
+            // The traced field keeps converging after a change, so keep reading while the room is on screen.
+            while !Task.isCancelled {
+                measured = await session.engine.measuredRoom()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         .task { await reload() }
     }
 

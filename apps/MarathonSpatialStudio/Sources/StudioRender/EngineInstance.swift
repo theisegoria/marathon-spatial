@@ -230,6 +230,8 @@ public final class EngineInstance {
     public func tickAcoustics(_ f: EngineFrame, seconds: Double) throws {
         guard let acoustics else { return }
         ms_acoustics_set_listener(acoustics, vec(f.listenerPosition))
+        // The convolution reverb's stereo decoding turns with the listener.
+        ms_acoustics_set_listener_orientation(acoustics, vec(f.listenerForward), vec(f.listenerUp))
         for pose in f.sources + f.bodies {
             if let id = acousticIDs[pose.id] { ms_acoustics_source_set(acoustics, id, vec(pose.position), 0.1) }
         }
@@ -275,7 +277,11 @@ public final class EngineInstance {
         ms_acoustics_room_view_get(acoustics, 0, &view)
         guard view.active != 0 else { return nil }
         let t60 = withUnsafeBytes(of: view.t60) { Array($0.bindMemory(to: Float.self)) }
-        return MeasuredRoom(volume: Double(view.volume), surfaceArea: Double(view.surface_area), t60Seconds: t60.map(Double.init))
+        var energy = ms_acoustic_energy_view()
+        ms_acoustics_energy_view_get(acoustics, &energy)
+        let traced = energy.seconds > 0 ? withUnsafeBytes(of: energy.t60) { Array($0.bindMemory(to: Float.self)) }.map(Double.init) : []
+        return MeasuredRoom(volume: Double(view.volume), surfaceArea: Double(view.surface_area), t60Seconds: t60.map(Double.init),
+                            tracedT60Seconds: traced)
     }
 
     private func selectHRTF(_ id: String?) throws {
