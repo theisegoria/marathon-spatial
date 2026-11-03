@@ -17,6 +17,7 @@
     <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMotionUsageDescription</key><string>Head tracking from your headphones keeps sound fixed in the room as you turn.</string>
+    <key>NSCameraUsageDescription</key><string>With 3D speakers set to follow you, the camera finds where you sit so the effect follows you. No image is kept.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

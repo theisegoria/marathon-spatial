@@ -96,6 +96,18 @@ final class ProjectSession {
         }
     }
     let headTracker = HeadTracker()
+    /// Headphone head tracking belongs to the binaural output alone.
+    var outputIsHeadphones: Bool { (project?.render.output ?? .binaural) == .binaural }
+    let cameraTracker = CameraHeadTracker()
+    private var cameraRunning = false
+
+    /// The camera runs while the document asks for 3D speakers that follow the head, and only then.
+    private func syncCamera(_ render: RenderSettings) {
+        let want = render.output == .speakers3D && render.crosstalkSettings.headTracking
+        guard want != cameraRunning else { return }
+        cameraRunning = want
+        if want { cameraTracker.start(engine: engine) } else { cameraTracker.stop(engine: engine) }
+    }
 
     var strikeImpulseNs = 0.05
     var strikeContactSeconds = 0.001
@@ -128,6 +140,9 @@ final class ProjectSession {
     func projectChanged(_ project: SpatialProject, pathLimit: Int) {
         self.project = project
         self.pathLimit = pathLimit
+        syncCamera(project.render)
+        // Headphone head tracking turns the binaural image with the head; speakers stand still, so it stops for them.
+        if project.render.output != .binaural, headTracking { headTracking = false }
         refreshReflections(project)
         if isPlaying { engine.update(ProjectCompiler.frame(project: project, time: playhead)) }
         guard needsReconfigure(project) else { return }

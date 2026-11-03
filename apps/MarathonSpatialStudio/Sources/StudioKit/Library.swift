@@ -76,11 +76,16 @@ public struct RenderPreset: Codable, Hashable, Sendable, Identifiable {
         var early = RenderSettings(); early.lateReverb = false
         var full = RenderSettings()
         var speakers = RenderSettings(); speakers.output = .stereo
+        var laptop = RenderSettings(); laptop.output = .speakers3D
+        var desk = RenderSettings(); desk.output = .speakers3D
+        desk.crosstalk = { var c = CrosstalkSettings(); c.spanDegrees = 30; c.distanceMetres = 0.8; return c }()
         return [
             RenderPreset(id: "full", name: "Full binaural", settings: full),
             RenderPreset(id: "early", name: "Direct and early reflections", settings: early),
             RenderPreset(id: "dry", name: "Direct sound only", settings: dry),
             RenderPreset(id: "speakers", name: "Stereo speakers", settings: speakers),
+            RenderPreset(id: "laptop3d", name: "Laptop speakers, 3D", settings: laptop),
+            RenderPreset(id: "desk3d", name: "Desk speakers, 3D", settings: desk),
         ]
     }()
 }

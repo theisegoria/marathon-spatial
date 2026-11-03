@@ -175,6 +175,36 @@ void ms_crosstalk_params_default(ms_crosstalk_params* p) {
     p->max_boost_db = 15.0f;
     p->low_hz = 200.0f;
     p->high_hz = 7000.0f;
+    p->edge_boost_db = 9.0f;
+    p->listener_distance_m = 0.6f;
+    p->robust_radius_m = 0.03f;
+    p->equalize = 1;
+}
+
+ms_status ms_head_position_from_body(float centreX, float width, float fovDegrees, float bodyWidth, ms_head_position* head) {
+    if (!head) return MS_ERR_INVALID_ARGUMENT;
+    *head = ms_head_position{};
+    if (!(width > 0.01f && width <= 1.0f) || !(fovDegrees >= 20.0f && fovDegrees <= 150.0f) || !std::isfinite(centreX)) return MS_ERR_INVALID_ARGUMENT;
+    if (!(bodyWidth > 0.0f)) bodyWidth = 0.42f;
+    // A body bodyWidth across that fills width of an image spanning 2 z tan(fov / 2) at depth z. The image's left is the listener's
+    // right, since the camera faces them.
+    const float spread = 2.0f * std::tan(0.5f * fovDegrees * kPi / 180.0f);
+    head->z_m = bodyWidth / (width * spread);
+    head->x_m = head->z_m * (0.5f - centreX) * spread;
+    head->valid = 1;
+    return MS_OK;
+}
+
+void ms_crosstalk_params_follow_head(ms_crosstalk_params* p, const ms_head_position* head) {
+    if (!p) return;
+    if (!head || !head->valid) {
+        p->head_x_m = p->head_z_m = 0.0f;
+        return;
+    }
+    // Held inside what the design takes, with room for the robust radius and a clear gap to the speakers.
+    const float span = p->speaker_span_degrees * kPi / 180.0f, D = p->listener_distance_m;
+    p->head_x_m = std::clamp(head->x_m, -0.3f, 0.3f);
+    p->head_z_m = std::clamp(head->z_m - D, -std::max(0.0f, D * std::cos(span) - 0.3f), 0.4f);
 }
 
 ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* params) {

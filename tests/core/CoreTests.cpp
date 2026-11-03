@@ -2378,91 +2378,146 @@ Render crosstalkRender(ms_vec3 position, const ms_crosstalk_params* params, std:
     return out;
 }
 
+// The ears' response to each channel through a canceller and a plant, at a frequency: [ear][channel].
+void earResponse(const core::CrosstalkFilter& f, const ms_crosstalk_params& heard, double hz, std::complex<double> out[2][2]) {
+    std::complex<double> h[2][2];
+    core::crosstalkPlant(heard, hz, kSpeed, h);
+    std::complex<double> c[2][2];
+    for (int s = 0; s < 2; ++s)
+        for (int ch = 0; ch < 2; ++ch) c[s][ch] = tapResponse(f.impulse[s][ch], hz);
+    for (int e = 0; e < 2; ++e)
+        for (int ch = 0; ch < 2; ++ch) out[e][ch] = h[e][0] * c[0][ch] + h[e][1] * c[1][ch];
+}
+
+// Mean over 300 Hz to 5 kHz of how far the far ear is below the near one for each channel, in dB: with this canceller, and with none.
+std::pair<double, double> separation(const core::CrosstalkFilter& f, const ms_crosstalk_params& heard) {
+    double with = 0.0, without = 0.0;
+    int count = 0;
+    for (double hz = 300.0; hz <= 5000.0; hz *= std::pow(2.0, 1.0 / 6.0), ++count) {
+        std::complex<double> e[2][2], h[2][2];
+        earResponse(f, heard, hz, e);
+        core::crosstalkPlant(heard, hz, kSpeed, h);
+        with += 10.0 * std::log10(std::norm(e[0][0]) / std::norm(e[1][0])) + 10.0 * std::log10(std::norm(e[1][1]) / std::norm(e[0][1]));
+        without += 10.0 * std::log10(std::norm(h[0][0]) / std::norm(h[1][0])) + 10.0 * std::log10(std::norm(h[1][1]) / std::norm(h[0][1]));
+    }
+    return {with / (2 * count), without / (2 * count)};
+}
+
 void testCrosstalk() {
     gTest = "crosstalk";
     ms_crosstalk_params params;
     ms_crosstalk_params_default(&params);
+    // At the design point, for laptop, display and desk spans.
     for (float span : {10.0f, 15.0f, 30.0f}) {
         params.speaker_span_degrees = span;
         const auto filter = core::designCrosstalk(params, kRate, 128, kSpeed);
         CHECK(filter != nullptr, "span %g designs", span);
         if (!filter) continue;
-        // In the band: the far ear's share of one channel, with and without the canceller, through the same spherical-head plant.
-        double rejection = 0.0, plain = 0.0, worstBoost = -INFINITY;
-        int count = 0;
-        for (double hz = 300.0; hz <= 5000.0; hz *= std::pow(2.0, 1.0 / 6.0), ++count) {
-            const std::complex<double> r = core::crosstalkPlant(params, hz, kSpeed);
-            const std::complex<double> cs = tapResponse(filter->sum, hz), cd = tapResponse(filter->difference, hz);
-            const std::complex<double> near = ((1.0 + r) * cs + (1.0 - r) * cd) / 2.0, far = ((1.0 + r) * cs - (1.0 - r) * cd) / 2.0;
-            rejection += 20.0 * std::log10(std::abs(near) / std::abs(far));
-            plain += 20.0 * std::log10(1.0 / std::abs(r));
-        }
-        rejection /= count;
-        plain /= count;
-        for (double hz = 20.0; hz <= 20000.0; hz *= std::pow(2.0, 1.0 / 12.0)) {
-            const double cs = std::abs(tapResponse(filter->sum, hz)), cd = std::abs(tapResponse(filter->difference, hz));
-            worstBoost = std::max(worstBoost, 20.0 * std::log10(std::max(cs, cd)));
-        }
-        double outside = 0.0;
+        const auto [with, without] = separation(*filter, params);
+        double worstBoost = -INFINITY, outside = 0.0, leak = -INFINITY;
+        for (double hz = 20.0; hz <= 20000.0; hz *= std::pow(2.0, 1.0 / 12.0))
+            for (int s = 0; s < 2; ++s)
+                for (int ch = 0; ch < 2; ++ch) worstBoost = std::max(worstBoost, 20.0 * std::log10(std::abs(tapResponse(filter->impulse[s][ch], hz))));
         for (double hz : {40.0, 60.0, 80.0, 15000.0, 18000.0})
-            for (const auto* taps : {&filter->sum, &filter->difference}) {
-                const double db = 20.0 * std::log10(std::abs(tapResponse(*taps, hz)));
-                outside = std::max(outside, std::fabs(db));
+            for (int s = 0; s < 2; ++s) {
+                outside = std::max(outside, std::fabs(20.0 * std::log10(std::abs(tapResponse(filter->impulse[s][s], hz)))));
+                leak = std::max(leak, 20.0 * std::log10(std::abs(tapResponse(filter->impulse[s][1 - s], hz))));
             }
-        std::printf("  span %4.1f: far ear %5.1f dB down with the canceller, %4.1f dB without; largest boost %4.1f dB; out of band within %.2f dB\n", span,
-                    rejection, plain, worstBoost, outside);
-        CHECK(rejection > 20.0 && rejection - plain > 12.0, "span %g: %g dB against %g", span, rejection, plain);
-        CHECK(worstBoost < params.max_boost_db + 0.5, "span %g boosts %g dB", span, worstBoost);
-        CHECK(outside < 1.0, "span %g: out of band %g dB from plain stereo", span, outside);
+        std::printf("  span %4.1f: far ear %5.1f dB down with the canceller, %4.1f dB without; largest gain %4.1f dB; out of band within %.2f dB, "
+                    "cross-feed %.0f dB\n", span, with, without, worstBoost, outside, leak);
+        CHECK(with > 20.0 && with - without > 12.0, "span %g: %g dB against %g", span, with, without);
+        CHECK(worstBoost < params.max_boost_db + 6.5, "span %g gains %g dB", span, worstBoost);  // The cap, and at most 6 dB of correction.
+        CHECK(outside < 1.0 && leak < -30.0, "span %g: out of band %g dB from plain stereo, cross-feed %g dB", span, outside, leak);
     }
-    // Off the design: a canceller made for 15 degrees and an average head, heard with the speakers at 12 or 18 degrees (the player leaning
-    // in or back) or by a smaller head. It should still beat plain stereo, though by less.
+    // The robust design holds where the head actually is: a canceller fitted over a cross of positions 3 cm around the centre, against one
+    // fitted to the centre alone, both heard with the head moved.
+    ms_crosstalk_params_default(&params);
+    ms_crosstalk_params point = params;
+    point.robust_radius_m = 0.0f;
+    const auto robust = core::designCrosstalk(params, kRate, 128, kSpeed), sharp = core::designCrosstalk(point, kRate, 128, kSpeed);
+    double robustWorst = INFINITY, sharpWorst = INFINITY;
+    for (const auto& [x, z] : {std::pair{0.03f, 0.0f}, std::pair{-0.04f, 0.0f}, std::pair{0.0f, 0.06f}, std::pair{0.0f, -0.05f}}) {
+        ms_crosstalk_params heard = params;
+        heard.head_x_m = x;
+        heard.head_z_m = z;
+        const double r = separation(*robust, heard).first, s = separation(*sharp, heard).first;
+        std::printf("  head %+.2f m across, %+.2f m back: far ear %5.1f dB down with the robust design, %5.1f dB with the point design\n", x, z, r, s);
+        robustWorst = std::min(robustWorst, r);
+        sharpWorst = std::min(sharpWorst, s);
+    }
+    CHECK(robustWorst > sharpWorst && robustWorst > 10.0, "the robust design's worst case %g dB against %g dB", robustWorst, sharpWorst);
+    // Head tracking: a canceller re-designed for where the head went beats the centred one heard from there.
+    for (const auto& [x, yaw] : {std::pair{0.10f, 0.0f}, std::pair{-0.08f, 0.0f}, std::pair{0.0f, 20.0f}}) {
+        ms_crosstalk_params moved = params;
+        moved.head_x_m = x;
+        moved.head_yaw_degrees = yaw;
+        const auto tracked = core::designCrosstalk(moved, kRate, 128, kSpeed);
+        CHECK(tracked != nullptr, "a moved head designs");
+        if (!tracked) continue;
+        const double followed = separation(*tracked, moved).first, stale = separation(*robust, moved).first;
+        std::printf("  head %+.2f m across, turned %+.0f degrees: re-designed %5.1f dB, centred design %5.1f dB\n", x, yaw, followed, stale);
+        CHECK(followed > 20.0 && followed > stale + 6.0, "tracking: %g against %g", followed, stale);
+    }
+    // From a camera's view of a person to the canceller: an upper body a quarter of a 70-degree image wide is 0.42 m at 1.2 m; one left of
+    // centre in the image is to the listener's right.
     {
-        ms_crosstalk_params designed;
-        ms_crosstalk_params_default(&designed);
-        const auto filter = core::designCrosstalk(designed, kRate, 128, kSpeed);
-        for (const auto& [span, radius] : {std::pair{12.0f, 0.0875f}, std::pair{18.0f, 0.0875f}, std::pair{15.0f, 0.075f}}) {
-            ms_crosstalk_params actual = designed;
-            actual.speaker_span_degrees = span;
-            actual.head_radius_m = radius;
-            double rejection = 0.0, plain = 0.0;
-            int count = 0;
-            for (double hz = 300.0; hz <= 5000.0; hz *= std::pow(2.0, 1.0 / 6.0), ++count) {
-                const std::complex<double> r = core::crosstalkPlant(actual, hz, kSpeed);
-                const std::complex<double> cs = tapResponse(filter->sum, hz), cd = tapResponse(filter->difference, hz);
-                rejection += 20.0 * std::log10(std::abs((1.0 + r) * cs + (1.0 - r) * cd) / std::abs((1.0 + r) * cs - (1.0 - r) * cd));
-                plain += 20.0 * std::log10(1.0 / std::abs(r));
-            }
-            std::printf("  designed for 15 degrees, heard at %4.1f with a %.1f cm head: far ear %5.1f dB down, %4.1f dB plain\n", span, radius * 100.0,
-                        rejection / count, plain / count);
-            CHECK(rejection / count - plain / count > 6.0, "off the design at %g degrees: %g against %g", span, rejection / count, plain / count);
-        }
+        ms_head_position head;
+        OK(ms_head_position_from_body(0.5f, 0.25f, 70.0f, 0.42f, &head));
+        const double z = 0.42 / (0.25 * 2.0 * std::tan(35.0 * M_PI / 180.0));
+        CHECK(head.valid && std::fabs(head.z_m - z) < 1e-4 && std::fabs(head.x_m) < 1e-6, "centred person at %g m, %g across", head.z_m, head.x_m);
+        OK(ms_head_position_from_body(0.4f, 0.5f, 70.0f, 0.0f, &head));
+        const double z2 = 0.42 / (0.5 * 2.0 * std::tan(35.0 * M_PI / 180.0));
+        CHECK(std::fabs(head.x_m - z2 * 0.1 * 2.0 * std::tan(35.0 * M_PI / 180.0)) < 1e-4 && head.x_m > 0.0f, "off-centre person: %g m right", head.x_m);
+        ms_head_position none;
+        CHECK(ms_head_position_from_body(0.5f, 0.0f, 70.0f, 0.42f, &none) == MS_ERR_INVALID_ARGUMENT && !none.valid, "a box with no width");
+        ms_crosstalk_params followed;
+        ms_crosstalk_params_default(&followed);
+        followed.head_yaw_degrees = 10.0f;
+        ms_crosstalk_params_follow_head(&followed, &head);
+        CHECK(std::fabs(followed.head_x_m - head.x_m) < 1e-6 && std::fabs(followed.head_z_m - (head.z_m - followed.listener_distance_m)) < 1e-6 &&
+                  followed.head_yaw_degrees == 10.0f && core::designCrosstalk(followed, kRate, 128, kSpeed) != nullptr,
+              "the canceller follows the position, keeps its set turn, and still designs");
+        head.x_m = 2.0f;
+        head.z_m = 0.01f;
+        ms_crosstalk_params_follow_head(&followed, &head);
+        CHECK(followed.head_x_m == 0.3f && core::designCrosstalk(followed, kRate, 128, kSpeed) != nullptr, "a wild reading is held to what designs");
+        head.valid = 0;
+        ms_crosstalk_params_follow_head(&followed, &head);
+        CHECK(followed.head_x_m == 0.0f && followed.head_z_m == 0.0f, "losing the listener centres it again");
+    }
+    // Out of range: a span past 60, a head on a speaker, too wide a robust radius.
+    for (const auto& change : std::vector<std::function<void(ms_crosstalk_params&)>>{[](ms_crosstalk_params& p) { p.speaker_span_degrees = 70; },
+                                                                                   [](ms_crosstalk_params& p) { p.head_x_m = -0.15f, p.head_z_m = -0.5f, p.listener_distance_m = 0.5f; },
+                                                                                   [](ms_crosstalk_params& p) { p.robust_radius_m = 0.2f; }}) {
+        ms_crosstalk_params bad;
+        ms_crosstalk_params_default(&bad);
+        change(bad);
+        CHECK(core::designCrosstalk(bad, kRate, 128, kSpeed) == nullptr, "out of range parameters are refused");
     }
     params.speaker_span_degrees = 70.0f;
-    CHECK(core::designCrosstalk(params, kRate, 128, kSpeed) == nullptr, "a span past 60 degrees is refused");
-    ms_engine* bad = makeEngine(gSphere);
-    CHECK(ms_engine_set_crosstalk(bad, &params) == MS_ERR_INVALID_ARGUMENT, "and so through the API");
-    ms_engine_destroy(bad);
+    ms_engine* refused = makeEngine(gSphere);
+    CHECK(ms_engine_set_crosstalk(refused, &params) == MS_ERR_INVALID_ARGUMENT, "and so through the API");
+    ms_engine_destroy(refused);
 
-    // The render path: the engine's output equals the plain render shuffled, filtered and recombined offline.
+    // The render path: the engine's output equals the plain render through the four filters offline, from the second block on (the first
+    // crosses over from plain stereo, as any change of filter does).
     ms_crosstalk_params_default(&params);
+    params.head_x_m = 0.05f;  // Off centre, so the filters are not symmetric.
     const std::uint32_t frames = 9600;
     const Render dry = crosstalkRender({-2, 0, -1}, nullptr, frames), wet = crosstalkRender({-2, 0, -1}, &params, frames);
     const auto filter = core::designCrosstalk(params, kRate, 128, kSpeed);
     double worst = 0.0, peak = 0.0;
-    // The first block crosses over from plain stereo, as any change of filter does.
     for (std::uint32_t t = 128; t < frames; ++t) {
-        double s = 0.0, d = 0.0;
-        for (std::uint32_t k = 0; k < filter->taps && k <= t; ++k) {
-            s += filter->sum[k] * (static_cast<double>(dry.l[t - k]) + dry.r[t - k]);
-            d += filter->difference[k] * (static_cast<double>(dry.l[t - k]) - dry.r[t - k]);
-        }
-        worst = std::max({worst, std::fabs(wet.l[t] - 0.5 * (s + d)), std::fabs(wet.r[t] - 0.5 * (s - d))});
+        double out[2] = {0.0, 0.0};
+        for (int s = 0; s < 2; ++s)
+            for (std::uint32_t k = 0; k < filter->taps && k <= t; ++k)
+                out[s] += filter->impulse[s][0][k] * static_cast<double>(dry.l[t - k]) + filter->impulse[s][1][k] * static_cast<double>(dry.r[t - k]);
+        worst = std::max({worst, std::fabs(wet.l[t] - out[0]), std::fabs(wet.r[t] - out[1])});
         peak = std::max(peak, static_cast<double>(std::fabs(wet.l[t])));
     }
     std::printf("  render path against offline filtering: worst error %.2e of a %.2e peak\n", worst, peak);
     CHECK(peak > 0.0 && worst < 1e-4 * peak + 1e-7, "render path differs by %g", worst);
-    // Switched off, the master is exactly the plain render again from the next block on.
+    // Switched off, the master is exactly the plain render again from the next block boundary on.
     const Render off = crosstalkRender({-2, 0, -1}, &params, frames, 4800);
     bool same = true;
     for (std::uint32_t t = 4992; t < frames; ++t) same = same && off.l[t] == dry.l[t] && off.r[t] == dry.r[t];

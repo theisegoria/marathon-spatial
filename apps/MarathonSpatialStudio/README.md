@@ -25,7 +25,10 @@ Requires macOS 27 on Apple silicon (M3 or later).
 - **Meters:** output peak and RMS with dB readouts, plus a level per source.
 - **Physics playground:** strike plates, bars and blocks with the pointer or keys 1 to 9, at any position, with chosen impulse and mallet
   hardness, or drag to scrape. See the body's modes. Record strikes onto the timeline, and export plays them.
-- **Stereo:** the speaker path is an equal-power pan with distance gain. It has no HRTF and, for now, no reflections.
+- **3D speakers:** the binaural render, reflections and all, through the library's crosstalk canceller, for two speakers in front of
+  you. Set each speaker's angle off centre and its distance; the laptop and desk presets set both. Optionally the front camera follows
+  where you sit, so the effect holds as you shift; no image is kept.
+- **Stereo:** the plain speaker path is an equal-power pan with distance gain. It has no HRTF and no reflections.
 - **Export:** offline render to binaural or stereo WAV at 16-bit, 24-bit or 32-bit float, 44.1 to 96 kHz, reporting peak and clipped samples.
 - **Presets and documents:** eight room presets, four render presets, your own of both, and `.mspatial` project packages with undo.
 

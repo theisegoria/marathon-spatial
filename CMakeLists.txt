@@ -41,10 +41,12 @@ target_link_libraries(marathon_spatial_core PRIVATE marathon_spatial_mysofa
     "-framework Accelerate" "-framework AudioToolbox" "-framework CoreFoundation")
 target_link_libraries(marathon_spatial_core INTERFACE "-framework Accelerate" "-framework AudioToolbox" "-framework CoreFoundation")
 
-add_library(marathon_spatial_output STATIC src/core/CoreAudioOutput.cpp)
+add_library(marathon_spatial_output STATIC src/core/CoreAudioOutput.cpp src/core/CameraHeadTracker.mm)
+set_source_files_properties(src/core/CameraHeadTracker.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_compile_features(marathon_spatial_output PUBLIC cxx_std_20)
 target_compile_options(marathon_spatial_output PRIVATE -Wall -Wextra)
-target_link_libraries(marathon_spatial_output PUBLIC marathon_spatial_core "-framework CoreAudio")
+target_link_libraries(marathon_spatial_output PUBLIC marathon_spatial_core "-framework CoreAudio" "-framework AVFoundation" "-framework Vision"
+    "-framework CoreMedia" "-framework CoreVideo" "-framework QuartzCore")
 
 add_library(marathon_spatial INTERFACE)
 target_link_libraries(marathon_spatial INTERFACE marathon_spatial_core marathon_spatial_output)

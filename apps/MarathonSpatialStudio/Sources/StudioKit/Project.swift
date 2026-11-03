@@ -307,9 +307,28 @@ public struct ClipReference: Codable, Hashable, Sendable, Identifiable {
 }
 
 public enum OutputMode: String, Codable, Hashable, Sendable, CaseIterable, Identifiable {
-    case binaural, stereo
+    case binaural, stereo, speakers3D
     public var id: String { rawValue }
-    public var title: String { self == .binaural ? "Binaural (headphones)" : "Stereo (speakers)" }
+    public var title: String {
+        switch self {
+        case .binaural: "Binaural (headphones)"
+        case .stereo: "Stereo (speakers)"
+        case .speakers3D: "3D speakers (crosstalk cancellation)"
+        }
+    }
+    /// The binaural render reaches the listener: on headphones, or on two speakers through the crosstalk canceller.
+    public var isBinaural: Bool { self != .stereo }
+}
+
+/// Binaural sound on two speakers: where the speakers are, and whether the canceller follows the listener's head with the camera.
+public struct CrosstalkSettings: Codable, Hashable, Sendable {
+    /// Each speaker's angle off centre as the listener sees it: a laptop about 10, monitor speakers about 15, desk speakers about 30.
+    public var spanDegrees = 10.0
+    /// From the listener's head to each speaker.
+    public var distanceMetres = 0.5
+    /// Steer the canceller after the listener's head with the front camera.
+    public var headTracking = false
+    public init() {}
 }
 
 public struct RenderSettings: Codable, Hashable, Sendable {
@@ -324,6 +343,12 @@ public struct RenderSettings: Codable, Hashable, Sendable {
     public var masterGainDB = 0.0
     /// A master peak limiter at 0 dBFS. Off keeps levels linear for measurement.
     public var limiter = true
+    /// For 3D speakers. Absent in documents from before it existed, which take the defaults.
+    public var crosstalk: CrosstalkSettings?
+    public var crosstalkSettings: CrosstalkSettings {
+        get { crosstalk ?? CrosstalkSettings() }
+        set { crosstalk = newValue }
+    }
     public init() {}
 }
 

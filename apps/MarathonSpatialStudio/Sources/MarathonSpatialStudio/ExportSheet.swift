@@ -81,7 +81,7 @@ struct ExportSheet: View {
     private func choose() async {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.wav]
-        panel.nameFieldStringValue = "Marathon Spatial \(output == .binaural ? "binaural" : "stereo").wav"
+        panel.nameFieldStringValue = "Marathon Spatial \(output == .binaural ? "binaural" : output == .speakers3D ? "3D speakers" : "stereo").wav"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         result = nil
         failure = nil

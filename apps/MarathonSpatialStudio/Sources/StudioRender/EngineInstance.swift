@@ -63,6 +63,9 @@ public final class EngineInstance {
     private var physics: [OpaquePointer] = []
     private var hrtfID: String??
     private var stereo = false
+    /// The canceller as the document sets it, before any tracked head, or nil when the output is not 3D speakers.
+    private var crosstalk: ms_crosstalk_params?
+    private var trackedHead = ms_head_position()
     /// The room's simulator, its late reverb and the bus that runs it. One room, one network.
     private var acoustics: OpaquePointer?
     private var reverb: OpaquePointer?
@@ -107,6 +110,7 @@ public final class EngineInstance {
 
     public func apply(_ c: EngineConfiguration) throws {
         stereo = c.render.output == .stereo
+        try applyCrosstalk(c.render)
         earlyReflections = c.render.earlyReflections
         lateReverb = c.render.lateReverb
         try selectHRTF(c.render.hrtfSet)
@@ -127,6 +131,39 @@ public final class EngineInstance {
     }
 
     public func commit() throws { try check(ms_engine_commit(engine), "Publishing the scene") }
+
+    private func applyCrosstalk(_ render: RenderSettings) throws {
+        guard render.output == .speakers3D else {
+            if crosstalk != nil { try check(ms_engine_set_crosstalk(engine, nil), "Turning crosstalk cancellation off") }
+            crosstalk = nil
+            return
+        }
+        var p = ms_crosstalk_params()
+        ms_crosstalk_params_default(&p)
+        p.speaker_span_degrees = Float(render.crosstalkSettings.spanDegrees)
+        p.listener_distance_m = Float(render.crosstalkSettings.distanceMetres)
+        if let crosstalk, crosstalk.speaker_span_degrees == p.speaker_span_degrees, crosstalk.listener_distance_m == p.listener_distance_m { return }
+        crosstalk = p
+        try steer()
+    }
+
+    private func steer() throws {
+        guard var p = crosstalk else { return }
+        var head = trackedHead
+        ms_crosstalk_params_follow_head(&p, &head)
+        try check(ms_engine_set_crosstalk(engine, &p), "Setting crosstalk cancellation")
+    }
+
+    /// Re-steers the canceller to where the listener sits, or back to the centre with nil. Designs on this thread, a few milliseconds.
+    public func setTrackedHead(_ head: TrackedHeadPosition?) throws {
+        trackedHead = head.map { ms_head_position(x_m: Float($0.xMetres), z_m: Float($0.zMetres), valid: 1) } ?? ms_head_position()
+        guard crosstalk != nil else { return }
+        try steer()
+        try commit()
+    }
+
+    /// The canceller's added delay while it runs, in frames.
+    public var crosstalkLatencyFrames: UInt32 { ms_engine_crosstalk_latency_frames(engine) }
 
     private func destroyAcoustics(_ a: OpaquePointer, _ r: OpaquePointer?) {
         if let r { studio_reverb_destroy(r) }

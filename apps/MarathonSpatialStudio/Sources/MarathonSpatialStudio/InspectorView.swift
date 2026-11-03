@@ -173,7 +173,7 @@ private struct ListenerInspector: View {
         @Bindable var session = session
         Section("Head tracking") {
             Toggle("Track headphones", isOn: $session.headTracking)
-                .disabled(!session.headTracker.isAvailable)
+                .disabled(!session.headTracker.isAvailable || !session.outputIsHeadphones)
             Button("Recenter") { session.headTracker.recenter() }
                 .disabled(!session.headTracking)
             if !session.headTracker.isAvailable {
@@ -395,7 +395,28 @@ private struct RenderInspector: View {
                     Text(set.name).tag(Optional(set.id))
                 }
             }
-            .disabled(project.render.output != .binaural)
+            .disabled(!project.render.output.isBinaural)
+            if project.render.output == .speakers3D {
+                LabeledContent("Speaker angle") {
+                    HStack {
+                        Slider(value: $project.render.crosstalkSettings.spanDegrees, in: 2...60, step: 1)
+                        Text("\(Int(project.render.crosstalkSettings.spanDegrees))°").monospacedDigit().frame(width: 36, alignment: .trailing)
+                    }
+                }
+                LabeledContent("Speaker distance") {
+                    HStack {
+                        Slider(value: $project.render.crosstalkSettings.distanceMetres, in: 0.3...2, step: 0.05)
+                        Text(String(format: "%.2f m", project.render.crosstalkSettings.distanceMetres)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                    }
+                }
+                Toggle("Follow where I sit with the camera", isOn: $project.render.crosstalkSettings.headTracking)
+                    .disabled(!session.cameraTracker.isAvailable)
+                Text(session.cameraTracker.isRefused
+                     ? "Camera access is off for Marathon Spatial Studio. Turn it on in System Settings, Privacy & Security, Camera."
+                     : "Sit centred in front of the speakers. Each speaker's angle off centre: a laptop about 10°, monitor speakers 15°, desk speakers 30°. "
+                       + "With the camera on, the effect follows you as you shift or lean in and back; no image is kept.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let id = project.render.hrtfSet, let set = session.hrtfSets.first(where: { $0.id == id }) {
                 Text("\(set.detail). Licence: \(set.licence).").font(.caption).foregroundStyle(.secondary)
             }

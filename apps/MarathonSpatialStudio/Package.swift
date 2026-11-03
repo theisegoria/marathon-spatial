@@ -44,7 +44,8 @@ if linked {
     targets.append(.executableTarget(
         name: "MarathonSpatialStudio", dependencies: ["StudioKit", "StudioRender", "CStudioBridge"],
         swiftSettings: [.swiftLanguageMode(.v6), .define("MARATHON_SPATIAL_LINKED")],
-        linkerSettings: [.unsafeFlags(linkFlags(spatialLibraries)), .linkedFramework("CoreAudio")] + frameworks))
+        linkerSettings: [.unsafeFlags(linkFlags(spatialLibraries)), .linkedFramework("CoreAudio"), .linkedFramework("AVFoundation"), .linkedFramework("Vision"),
+                         .linkedFramework("CoreMedia"), .linkedFramework("CoreVideo"), .linkedFramework("QuartzCore")] + frameworks))
     targets.append(.testTarget(
         name: "StudioRenderTests", dependencies: ["StudioKit", "StudioRender"], swiftSettings: [.swiftLanguageMode(.v6)],
         linkerSettings: [.unsafeFlags(linkFlags(renderLibraries))] + frameworks))

@@ -31,6 +31,21 @@ public protocol SpatialEngine: AnyObject, Sendable {
     func render(_ configuration: EngineConfiguration, _ request: RenderRequest) -> AsyncThrowingStream<RenderBlock, Error>
 }
 
+/// Where the listener sits for the crosstalk canceller, as a camera between the speakers sees them: metres right of the camera's axis and
+/// out from it. Position only: which way they face is not tracked.
+public struct TrackedHeadPosition: Hashable, Sendable {
+    public var xMetres: Double
+    public var zMetres: Double
+    public init(xMetres: Double, zMetres: Double) {
+        self.xMetres = xMetres; self.zMetres = zMetres
+    }
+}
+
+public extension SpatialEngine {
+    /// Steers 3D speakers to where the listener sits, or back to the centre with nil. Engines without a canceller ignore it.
+    func setTrackedHead(_ head: TrackedHeadPosition?) {}
+}
+
 public struct EngineStatus: Sendable, Equatable {
     public var name: String
     public var version: String

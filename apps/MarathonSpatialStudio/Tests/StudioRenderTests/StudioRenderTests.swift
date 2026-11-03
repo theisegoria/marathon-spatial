@@ -115,6 +115,23 @@ private func room(width: Double = 12, depth: Double = 16, height: Double = 6) ->
 }
 
 /// To -120 dB, not to the bit: two runs in one process have differed by about 1e-7 at most, with the room's simulator off as well.
+@Test func threeDSpeakersRunTheBinauralRenderThroughTheCanceller() async throws {
+    var headphones = room()
+    headphones.render.earlyReflections = false
+    headphones.render.lateReverb = false
+    var speakers = headphones
+    speakers.render.output = .speakers3D
+    let binaural = try await render(headphones, seconds: 0.5), cancelled = try await render(speakers, seconds: 0.5)
+    #expect(binaural.count == cancelled.count)
+    #expect(cancelled.allSatisfy { $0.isFinite } && energy(cancelled, from: 0.1, to: 0.5) > 0)
+    // The canceller feeds each speaker from both channels, so the speakers differ from the headphone signal.
+    let difference = zip(binaural, cancelled).map { Double(abs($0 - $1)) }.max() ?? 0
+    #expect(difference > 1e-3)
+    // The same canceller twice gives the same samples.
+    let again = try await render(speakers, seconds: 0.5)
+    #expect((zip(cancelled, again).map { abs($0 - $1) }.max() ?? 1) < 1e-6)
+}
+
 @Test func anExportRepeats() async throws {
     let p = room()
     let a = try await render(p, seconds: 0.5), b = try await render(p, seconds: 0.5)

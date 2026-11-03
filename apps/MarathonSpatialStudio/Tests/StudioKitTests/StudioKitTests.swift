@@ -123,6 +123,22 @@ private func tempURL(_ name: String) -> URL {
         #expect(try ProjectPackage.decode(ProjectPackage.encode(p)) == p)
     }
 
+    @Test func threeDSpeakersRoundTripAndOldDocumentsTakeTheDefaults() throws {
+        var p = SpatialProject.starter()
+        p.render.output = .speakers3D
+        p.render.crosstalkSettings.spanDegrees = 30
+        p.render.crosstalkSettings.headTracking = true
+        #expect(try ProjectPackage.decode(ProjectPackage.encode(p)) == p)
+        // A document from before 3D speakers has no crosstalk settings at all.
+        let old = try JSONEncoder().encode(RenderSettings())
+        var json = try #require(JSONSerialization.jsonObject(with: old) as? [String: Any])
+        json.removeValue(forKey: "crosstalk")
+        let settings = try JSONDecoder().decode(RenderSettings.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(settings.crosstalk == nil && settings.crosstalkSettings == CrosstalkSettings())
+        #expect(RenderPreset.builtIn.contains { $0.id == "laptop3d" && $0.settings.output == .speakers3D })
+        #expect(OutputMode.speakers3D.isBinaural && !OutputMode.stereo.isBinaural)
+    }
+
     @Test func newerFormatIsRefusedRatherThanMisread() throws {
         var p = SpatialProject.starter()
         p.version = SpatialProject.formatVersion + 1

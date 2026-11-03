@@ -32,6 +32,28 @@ ms_status ms_output_start(ms_output* output);
 ms_status ms_output_stop(ms_output* output);
 void ms_output_destroy(ms_output* output);
 
+/* Position tracking by the front camera, for steering crosstalk cancellation to where the listener sits. Apple's Vision framework finds
+   the box round each person's upper body; the largest is followed, whoever else is in view, and the canceller keeps running. Only the
+   position leaves the tracker: it never estimates which way anyone faces, and no image is kept. The first start asks the user for camera
+   access, which the host app's Info.plist must explain under NSCameraUsageDescription. */
+typedef struct ms_head_tracker ms_head_tracker;
+
+typedef struct ms_head_tracker_config {
+    float horizontal_fov_degrees;  /* The camera's horizontal field of view; macOS does not report it. 0 takes 70, about a Mac's built-in camera. */
+    float body_width_m;            /* The real width of an upper body. 0 takes 0.42, about the shoulders. */
+    float frames_per_second;       /* Frames looked at each second. 0 takes 15. */
+    float smoothing;               /* How much of each new reading is taken, 0 to 1. 0 takes 0.35. */
+} ms_head_tracker_config;
+
+/* MS_ERR_DEVICE when the Mac has no camera. Nothing runs until ms_head_tracker_start. config may be NULL. */
+ms_status ms_head_tracker_create(const ms_head_tracker_config* config, ms_head_tracker** tracker);
+/* Starts the camera, asking for access the first time. MS_ERR_UNSUPPORTED when access has been refused. */
+ms_status ms_head_tracker_start(ms_head_tracker* tracker);
+void ms_head_tracker_stop(ms_head_tracker* tracker);
+void ms_head_tracker_destroy(ms_head_tracker* tracker);
+/* The latest smoothed position. valid is 0 until someone is seen, and again once no one has been for half a second. Any thread. */
+void ms_head_tracker_get(const ms_head_tracker* tracker, ms_head_position* head);
+
 typedef struct ms_output_stats {
     uint64_t callbacks;
     uint64_t overruns;      /* Cycles the HAL reported as overloaded. */

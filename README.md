@@ -22,8 +22,8 @@ Spatial Studio, a native macOS 27 app.
   response for convolution, and a feedback network carries the tail on at the level the field reached
 - Late reverb per room, driven by real room volume and absorption, coupled through portals
 - Higher-order ambisonic beds decoded through the same HRTFs
-- Crosstalk cancellation for binaural sound on two speakers, such as a laptop's or a desk pair: the image reaches well past the speakers
-  for a listener centred in front of them
+- Crosstalk cancellation for binaural sound on two speakers, such as a laptop's or a desk pair: the image reaches well past the speakers.
+  It holds a few centimetres around the listener, and follows where they sit when the front camera tracks them
 - Loudspeaker layouts from mono to 7.1.4 or your own: sources pan between speakers (VBAP), and the ambisonic mix with beds and
   reflections decodes to the layout (AllRAD, max-rE)
 - Head tracking from any tracker you feed it
@@ -139,9 +139,10 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Marathon Spatial Studio | Builds on the library, with offline render tests. Used and listened to on macOS 27 |
 | Bundled measured HRTF sets | Four sets in [`data/hrtf`](data/hrtf/PROVENANCE.md) |
 | Loudspeaker layouts: VBAP panning and an AllRAD decoder, mono to 7.1.4 and custom | In the tree, with CPU tests; through the C API |
-| Crosstalk cancellation on two speakers: regularised, band-limited, 5.3 ms of delay | In the tree, with CPU tests against a spherical-head model. Not yet listened to |
+| Crosstalk cancellation on two speakers: 2x2 regularised inverse over nearby head positions, band-limited, 5.3 ms of delay | In the tree, with CPU tests against a spherical-head model; in Studio as 3D speakers. Not yet listened to |
+| Camera position tracking that steers the canceller | In the tree; the box-to-position maths is tested. The camera path has not run |
 | Multichannel live output: a channel per speaker, layout read from the device | In the tree, with CPU tests of the layout mapping and channel writing. Not yet run on a multichannel device |
-| Stereo speaker path | In Studio: an equal-power pan with distance gain and no reflections |
+| Plain stereo speaker path | In Studio: an equal-power pan with distance gain and no reflections |
 
 Tests measure cues, levels and timing, and the author has listened to the result on headphones through Studio.
 

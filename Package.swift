@@ -38,10 +38,11 @@ let package = Package(
             dependencies: ["CMarathonSpatial"],
             path: ".",
             exclude: notEngine,
-            sources: ["src/core/CoreAudioOutput.cpp"],
+            sources: ["src/core/CoreAudioOutput.cpp", "src/core/CameraHeadTracker.mm"],
             publicHeadersPath: "include/CMarathonSpatialOutput",
             cxxSettings: [.headerSearchPath("include")],
-            linkerSettings: [.linkedFramework("CoreAudio")]),
+            linkerSettings: [.linkedFramework("CoreAudio"), .linkedFramework("AVFoundation"), .linkedFramework("Vision"), .linkedFramework("CoreMedia"),
+                             .linkedFramework("CoreVideo"), .linkedFramework("QuartzCore")]),
         .target(
             name: "MarathonSpatial",
             dependencies: ["CMarathonSpatial", "CMarathonSpatialOutput"],

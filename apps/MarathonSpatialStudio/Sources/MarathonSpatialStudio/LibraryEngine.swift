@@ -133,6 +133,11 @@ final class LibraryEngine: SpatialEngine, @unchecked Sendable {
         if let live { ms_head_set_orientation(live.engine, ms_quat(x: q.x, y: q.y, z: q.z, w: q.w)) }
     }
 
+    /// Waits for a configure rather than skipping: a head is sent only when it moves, so a skipped one would stay lost.
+    func setTrackedHead(_ head: TrackedHeadPosition?) {
+        lock.withLock { try? live?.setTrackedHead(head) }
+    }
+
     func strike(_ strike: Strike) {
         lock.withLock { live?.strike(strike, delaySeconds: 0) }
     }

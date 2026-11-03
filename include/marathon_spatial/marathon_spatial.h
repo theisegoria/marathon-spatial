@@ -101,9 +101,10 @@ ms_status ms_speaker_layout_pan(const ms_speaker_layout* layout, ms_vec3 directi
  *
  * Binaural sound on two loudspeakers. Each ear also hears the far speaker, and that crosstalk collapses the image to the line between the
  * speakers. The canceller feeds each speaker a filtered, inverted copy of the other channel that meets the crosstalk at the far ear, so the
- * binaural render reaches the ears nearly as on headphones and sounds can sit well outside the speakers. It works for a listener centred
- * between the speakers, facing them; off centre it fades towards plain stereo rather than failing badly, which the band limits and the
- * boost cap are for. Leave it off for headphones and for speaker layouts. */
+ * binaural render reaches the ears nearly as on headphones and sounds can sit well outside the speakers. It is designed for where the head
+ * is, centred by default or wherever a head tracker puts it, and holds over a few centimetres around that; further off it fades towards
+ * plain stereo rather than failing badly, which the band limits and the boost cap are for. Leave it off for headphones and for speaker
+ * layouts. */
 typedef struct ms_crosstalk_params {
     uint32_t enabled;
     float speaker_span_degrees; /* Each speaker's angle off centre as the listener sees it: a laptop about 10, monitor speakers about 15,
@@ -111,9 +112,34 @@ typedef struct ms_crosstalk_params {
     float head_radius_m;        /* The spherical head of the plant. 0.05 to 0.15. Default 0.0875. */
     float max_boost_db;         /* The most the canceller raises any frequency, 3 to 30. Lower is more robust and less coloured. Default 15. */
     float low_hz, high_hz;      /* The band where crosstalk is cancelled; plain stereo outside it. Default 200 and 7000. */
+    float edge_boost_db;        /* The boost cap towards the band's edges, where the regularisation tightens: 3 to max_boost_db. Default 9. */
+    float listener_distance_m;  /* From the centre of the head to each speaker, 0.2 to 5: a laptop about 0.5, desk speakers about 0.8.
+                                   Default 0.6. */
+    float head_x_m, head_z_m;   /* Where the head is: metres to the right of centre, and back from the speakers. Within 0.5. Default 0. */
+    float head_yaw_degrees;     /* A fixed turn of the head to the left, within 60, for a listener who sits angled. Default 0. */
+    float robust_radius_m;      /* The design holds over head positions this far around the head: 0 designs for the point alone. 0 to
+                                   0.1. Default 0.03. */
+    uint32_t equalize;          /* Nonzero flattens the canceller's own colour on the near ear, by at most 6 dB. Default 1. */
 } ms_crosstalk_params;
 
 void ms_crosstalk_params_default(ms_crosstalk_params* params);
+
+/* Where a listener is, as a camera between the speakers sees them: x_m to the right of the camera's axis and z_m out from the camera.
+   Position only: nothing here says which way the listener faces. valid is 0 when there is no one to report. */
+typedef struct ms_head_position {
+    float x_m;
+    float z_m;
+    uint32_t valid;
+} ms_head_position;
+
+/* Where a person is from the box round their upper body in a front camera's image, by a pinhole camera: the box's centre and width as
+   fractions of the image's width, as the camera sees it (unmirrored), the camera's horizontal field of view in degrees, and the real width
+   of an upper body (0 takes 0.42 m, about the shoulders). MS_ERR_INVALID_ARGUMENT for a width or field of view out of range. */
+ms_status ms_head_position_from_body(float centre_x, float width, float horizontal_fov_degrees, float body_width_m, ms_head_position* head);
+/* Points the canceller at where the listener is, for a camera midway between the speakers: head_x_m from x_m and head_z_m from how much
+   further out than listener_distance_m they are, each held to what the design accepts. head_yaw_degrees is left as it is. An invalid
+   position centres the canceller again. */
+void ms_crosstalk_params_follow_head(ms_crosstalk_params* params, const ms_head_position* head);
 
 /* Engine */
 
@@ -160,7 +186,8 @@ uint64_t ms_engine_render_interleaved(ms_engine* engine, float* stereo, uint32_t
    same render instead. Use one of the two per engine: a partial block left over from one is dropped by the other. Real-time safe. */
 uint64_t ms_engine_render_speakers(ms_engine* engine, float* const* channels, uint32_t frames);
 /* Crosstalk cancellation on the stereo master, for binaural sound on two speakers. Takes effect at the next commit, with a one-block
-   crossfade. It adds latency_frames of delay while on. MS_ERR_INVALID_ARGUMENT for parameters out of range, MS_ERR_UNSUPPORTED on a
+   crossfade. With a head tracker, call it again as the head moves: each call designs new filters on the calling thread (a few
+   milliseconds) and the engine crosses over to them, so the sweet spot follows the listener. It adds latency_frames of delay while on. MS_ERR_INVALID_ARGUMENT for parameters out of range, MS_ERR_UNSUPPORTED on a
    speaker-layout engine. NULL turns it off. */
 ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* params);
 /* The delay the canceller adds while on, in frames; 0 when it is off. */
