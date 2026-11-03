@@ -122,13 +122,13 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Late reverb, room acoustics and portals | In the tree, with CPU tests |
 | HRTF sets: analytic sphere, SOFA import, `.mshrtf` packs | In the tree, with CPU tests |
 | Source, voice and bed rendering, the engine | In the tree, with CPU tests |
-| Live Core Audio output | In the tree. Not yet run on a device |
+| Live Core Audio output | In the tree. Run on a Mac and listened to through Studio |
 | Head tracking from headphone sensors | In the tree. Not yet checked on real headphones |
-| Marathon Spatial Studio | Builds on the library, with offline render tests. Opened and inspected on macOS 27; no listening review yet |
+| Marathon Spatial Studio | Builds on the library, with offline render tests. Used and listened to on macOS 27 |
 | Bundled measured HRTF sets | Four sets in [`data/hrtf`](data/hrtf/PROVENANCE.md) |
 | Stereo speaker path | In Studio: an equal-power pan with distance gain and no reflections |
 
-Tests measure cues, levels and timing. Nothing here has had a listening review yet.
+Tests measure cues, levels and timing, and the author has listened to the result on headphones through Studio.
 
 ## Licence
 
