@@ -31,6 +31,9 @@ inline bool finiteBlock(const float* x, std::uint32_t n) noexcept {
     return std::isfinite(energy);
 }
 
+// Blocks the ambisonic mix keeps decoding after its last input: the binaural decoder's filter length, or a block or two of a speaker matrix.
+inline std::uint32_t mixHoldBlocks(const ms_engine& e) noexcept { return e.speakers ? 2 : e.decoder ? e.decoder->partitions + 2 : 0; }
+
 inline Quat unpackQuat(std::uint64_t v) noexcept {
     const auto unpack = [](std::uint64_t bits) { return static_cast<float>(static_cast<std::int16_t>(bits & 0xffffu)) / 32767.0f; };
     return normalized(Quat{unpack(v), unpack(v >> 16), unpack(v >> 32), unpack(v >> 48)});
@@ -127,6 +130,7 @@ void resetSource(RenderSource& s) {
     s.encodeWeight = 0.0f;
     s.peak = 0.0f;
     std::memset(s.encode, 0, sizeof s.encode);
+    s.haveSpeakerGain = false;
     clearBiquads(s);
 }
 
@@ -593,7 +597,7 @@ void renderReflections(ms_engine& e, HrtfVoice& v, const SourceSnapshot& snap, c
         std::memcpy(tap.encode, encodeTarget, sizeof encodeTarget);
         if (!used) tap.active = false;
     }
-    e.shActiveBlocks = e.decoder ? e.decoder->partitions + 2 : 0;
+    e.shActiveBlocks = mixHoldBlocks(e);
     v.bandWrite = (v.bandWrite + B) & (kReflectionFrames - 1);
 }
 
@@ -682,6 +686,30 @@ void renderDirect(ms_engine& e, RenderSource& s, const SourceSnapshot& snap, con
         delayEar(e, v, ear, earOut, v.delayTarget[ear], ear == 0 ? bus.left : bus.right);
     }
     v.delayWrite = (v.delayWrite + B) & (kDelayFrames - 1);
+}
+
+// A source on speakers: amplitude panning between the nearest ones, straight into the speaker mix with the gain of its bus chain, as the
+// ambisonic mix takes it. Distance and air are already in the signal; head-related cues have no place on speakers.
+void renderSpeakers(ms_engine& e, RenderSource& s, const float* mono, float mixFrom, float mixTo, Vec3 direction, std::uint32_t busIndex) {
+    const std::uint32_t B = e.B, N = e.speakers;
+    float target[kMaxSpeakers];
+    e.layout.pan(direction, target);
+    if (!s.haveSpeakerGain) {
+        std::memcpy(s.speakerGain, target, N * sizeof(float));
+        s.haveSpeakerGain = true;
+    }
+    const float product = e.busProduct[busIndex], productFrom = e.busProductFrom[busIndex];
+    const float invB = 1.0f / static_cast<float>(B);
+    for (std::uint32_t k = 0; k < N; ++k) {
+        const float from = s.speakerGain[k] * mixFrom * productFrom, to = target[k] * mixTo * product;
+        s.speakerGain[k] = target[k];
+        if (from == 0.0f && to == 0.0f) continue;
+        const float step = (to - from) * invB;
+        float* out = e.speakerMix.data() + static_cast<std::size_t>(k) * B;
+#pragma clang loop vectorize(enable)
+        for (std::uint32_t t = 0; t < B; ++t) out[t] += mono[t] * (from + step * static_cast<float>(t + 1));
+    }
+    e.opReal += static_cast<std::uint64_t>(N) * B;
 }
 
 void renderSource(ms_engine& e, std::uint32_t index) {
@@ -828,7 +856,7 @@ void renderSource(ms_engine& e, std::uint32_t index) {
         e.opReal += 2ull * B;
     } else {
         // Direct or shared mix. A voice gained or lost crosses over in one block.
-        bool direct = p.mode == MS_SPATIAL_HRTF && s.wantDirect && e.set;
+        bool direct = p.mode == MS_SPATIAL_HRTF && s.wantDirect && (e.set || e.speakers);
         if (direct && !s.voice) acquireVoice(e, s);
         direct = direct && s.voice;
         if (direct && starting) s.directMix = 1.0f;
@@ -838,7 +866,8 @@ void renderSource(ms_engine& e, std::uint32_t index) {
             // delay lines ring out. The voice is free again after that, and a promotion in the meantime simply resumes it.
             if (mixTo > 0.0f) s.voiceDrain = 0;
             else if (mixFrom > 0.0f) s.voiceDrain = voiceDrainBlocks(e, *s.voice);
-            renderDirect(e, s, snap, mono, mixFrom, mixTo, distance, direction);
+            if (e.speakers) renderSpeakers(e, s, mono, mixFrom, mixTo, direction, busIndex);
+            else renderDirect(e, s, snap, mono, mixFrom, mixTo, distance, direction);
             applyRamp(dry, B, mixFrom, mixTo);
             renderReflections(e, *s.voice, snap, dry, e.busProduct[busIndex]);
             if (mixTo == 0.0f && (s.voiceDrain == 0 || --s.voiceDrain == 0)) releaseVoice(e, s);
@@ -862,7 +891,7 @@ void renderSource(ms_engine& e, std::uint32_t index) {
             }
             e.opReal += static_cast<std::uint64_t>(e.C) * 2 * B;
             s.encodeWeight = bedTo > 0.0f ? 1.0f : 0.0f;
-            e.shActiveBlocks = e.decoder ? e.decoder->partitions + 2 : 0;
+            e.shActiveBlocks = mixHoldBlocks(e);
         }
     }
 
@@ -993,11 +1022,25 @@ void renderBed(ms_engine& e, std::uint32_t index) {
     }
     std::memcpy(b.rotation, next, cell * sizeof(float));
     b.gain = gainTo;
-    e.shActiveBlocks = e.decoder ? e.decoder->partitions + 2 : 0;
+    e.shActiveBlocks = mixHoldBlocks(e);
     if (ended || b.state == RenderBed::State::Stopping) b.state = RenderBed::State::Idle;
 }
 
 void decodeMix(ms_engine& e) {
+    if (e.speakers) {
+        // AllRAD: one matrix row per speaker, no filters and no latency.
+        if (e.shActiveBlocks == 0 || e.C == 0) return;
+        --e.shActiveBlocks;
+        const std::uint32_t B = e.B, C = std::min(e.C, e.layout.decodeChannels());
+        for (std::uint32_t k = 0; k < e.speakers; ++k) {
+            const float* row = e.layout.decodeRow(k);
+            float* out = e.speakerMix.data() + static_cast<std::size_t>(k) * B;
+            for (std::uint32_t c = 0; c < C; ++c)
+                if (row[c] != 0.0f) vDSP_vsma(e.shMix.data() + static_cast<std::size_t>(c) * B, 1, &row[c], out, 1, out, 1, B);
+        }
+        e.opReal += static_cast<std::uint64_t>(e.speakers) * C * B;
+        return;
+    }
     if (!e.decoder || e.shActiveBlocks == 0) return;
     --e.shActiveBlocks;
     const std::uint32_t B = e.B, C = e.C;
@@ -1113,7 +1156,7 @@ void mixBuses(ms_engine& e) {
     }
 }
 
-void renderBlock(ms_engine& e, float* left, float* right) {
+void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
     const std::uint32_t B = e.B;
     processCommands(e);  // Commands before the snapshot: any command read has its snapshot already published.
     if (e.blockCallback) e.blockCallback(e.blockUser, B, e.frame);
@@ -1130,6 +1173,10 @@ void renderBlock(ms_engine& e, float* left, float* right) {
     e.up = cross(e.right, forward);
     e.back = forward * -1.0f;
     e.headFrom = conjugate(unpackQuat(e.headPacked.load(std::memory_order_acquire)));
+    if (e.speakers) {
+        e.headFrom = Quat{};  // Speakers stand still in the room whichever way the head turns.
+        std::memset(e.speakerMix.data(), 0, static_cast<std::size_t>(e.speakers) * B * sizeof(float));
+    }
 
     for (std::uint32_t i = 0; i < e.desc.max_buses; ++i) {
         if (!e.buses[i].used) continue;
@@ -1162,39 +1209,81 @@ void renderBlock(ms_engine& e, float* left, float* right) {
     if (e.retiringSet) {
         if (e.retired.push({Retired::Kind::Hrtf, e.retiringSet, nullptr})) e.retiringSet = nullptr;
     }
+    const float masterTo = e.frameBuses[0].gain, masterFrom = e.buses[0].primed ? e.buses[0].gain : masterTo;
     mixBuses(e);
 
     RenderBus& master = e.buses[0];
+    // The finished channels: the master's two for headphones, or the speakers, which take the master's gain here and its stereo content
+    // as a phantom pair.
+    float* finals[kMaxSpeakers];
+    std::uint32_t F = 2;
+    if (e.speakers) {
+        F = e.speakers;
+        for (std::uint32_t k = 0; k < F; ++k) {
+            float* out = finals[k] = e.speakerMix.data() + static_cast<std::size_t>(k) * B;
+            applyRamp(out, B, masterFrom, masterTo);
+            const float gl = e.layout.stereoIn(0)[k], gr = e.layout.stereoIn(1)[k];
+            if (gl != 0.0f) vDSP_vsma(master.left, 1, &gl, out, 1, out, 1, B);
+            if (gr != 0.0f) vDSP_vsma(master.right, 1, &gr, out, 1, out, 1, B);
+        }
+        e.opReal += 3ull * F * B;
+    } else {
+        finals[0] = master.left;
+        finals[1] = master.right;
+    }
     if (e.desc.limiter) {
-        float peak = 0.0f, peakR = 0.0f;
-        vDSP_maxmgv(master.left, 1, &peak, B);
-        vDSP_maxmgv(master.right, 1, &peakR, B);
-        peak = std::max(peak, peakR);
+        float peak = 0.0f;
+        for (std::uint32_t c = 0; c < F; ++c) {
+            float channelPeak = 0.0f;
+            vDSP_maxmgv(finals[c], 1, &channelPeak, B);
+            peak = std::max(peak, channelPeak);
+        }
         const float target = peak > 1.0f ? 1.0f / peak : 1.0f;
         const float next = target < e.limiterGain ? target : std::min(1.0f, e.limiterGain + 0.002f);
-        applyRamp(master.left, B, e.limiterGain, next);
-        applyRamp(master.right, B, e.limiterGain, next);
-        e.limiterGain = next;
         const float low = -1.0f, high = 1.0f;
-        vDSP_vclip(master.left, 1, &low, &high, master.left, 1, B);
-        vDSP_vclip(master.right, 1, &low, &high, master.right, 1, B);
+        for (std::uint32_t c = 0; c < F; ++c) {
+            applyRamp(finals[c], B, e.limiterGain, next);
+            vDSP_vclip(finals[c], 1, &low, &high, finals[c], 1, B);
+        }
+        e.limiterGain = next;
     }
     float sums[2] = {0, 0}, peaks[2] = {0, 0};
-    vDSP_svesq(master.left, 1, &sums[0], B);
-    vDSP_svesq(master.right, 1, &sums[1], B);
-    vDSP_maxmgv(master.left, 1, &peaks[0], B);
-    vDSP_maxmgv(master.right, 1, &peaks[1], B);
-    if (!std::isfinite(sums[0]) || !std::isfinite(sums[1])) {
-        std::memset(master.left, 0, B * sizeof(float));
-        std::memset(master.right, 0, B * sizeof(float));
+    bool finite = true;
+    std::uint64_t overs = 0;
+    for (std::uint32_t c = 0; c < F; ++c) {
+        float sum = 0.0f, peak = 0.0f;
+        vDSP_svesq(finals[c], 1, &sum, B);
+        vDSP_maxmgv(finals[c], 1, &peak, B);
+        finite = finite && std::isfinite(sum);
+        if (c < 2) {
+            sums[c] = sum;
+            peaks[c] = peak;
+        }
+        if (peak > 1.0f)
+            for (std::uint32_t t = 0; t < B; ++t) overs += std::fabs(finals[c][t]) > 1.0f;
+    }
+    if (!finite) {
+        for (std::uint32_t c = 0; c < F; ++c) std::memset(finals[c], 0, B * sizeof(float));
         e.stats.faults.fetch_add(1, std::memory_order_relaxed);
         sums[0] = sums[1] = peaks[0] = peaks[1] = 0.0f;
+        overs = 0;
     }
-    std::uint64_t overs = 0;
-    if (peaks[0] > 1.0f || peaks[1] > 1.0f)
-        for (std::uint32_t t = 0; t < B; ++t) overs += (std::fabs(master.left[t]) > 1.0f) + (std::fabs(master.right[t]) > 1.0f);
-    std::memcpy(left, master.left, B * sizeof(float));
-    std::memcpy(right, master.right, B * sizeof(float));
+    if (F == 1) {
+        sums[1] = sums[0];
+        peaks[1] = peaks[0];
+    }
+    if (outCount == F) {
+        for (std::uint32_t c = 0; c < F; ++c) std::memcpy(outs[c], finals[c], B * sizeof(float));
+    } else {
+        // A speaker render asked for as stereo: fold the speakers down.
+        for (std::uint32_t side = 0; side < 2; ++side) {
+            std::memset(outs[side], 0, B * sizeof(float));
+            for (std::uint32_t k = 0; k < F; ++k) {
+                const float g = e.layout.stereoOut(side)[k];
+                if (g != 0.0f) vDSP_vsma(finals[k], 1, &g, outs[side], 1, outs[side], 1, B);
+            }
+        }
+    }
     e.frame += B;
 
     AtomicStats& st = e.stats;
@@ -1219,25 +1308,30 @@ void renderBlock(ms_engine& e, float* left, float* right) {
 
 }  // namespace
 
-extern "C" uint64_t ms_engine_render(ms_engine* engine, float* left, float* right, uint32_t frames) {
-    ms_engine& e = *engine;
+namespace {
+
+// Renders frames into outCount channels: whole blocks straight into the caller's memory, a partial one through the FIFO.
+std::uint64_t renderFrames(ms_engine& e, float* const* outs, std::uint32_t outCount, std::uint32_t frames) {
     const std::uint64_t begin = mach_absolute_time();
     const std::uint32_t B = e.B;
-    float* fifoL = e.fifo.data();
-    float* fifoR = fifoL + B;
+    float* fifo[kMaxSpeakers];
+    for (std::uint32_t c = 0; c < outCount; ++c) fifo[c] = e.fifo.data() + static_cast<std::size_t>(c) * B;
+    if (e.fifoChannels != outCount) e.fifoRead = e.fifoFill;  // Left by the other entry point, in another channel count.
+    e.fifoChannels = outCount;
+    float* at[kMaxSpeakers];
     std::uint32_t done = 0;
     while (done < frames) {
         if (e.fifoRead < e.fifoFill) {
             const std::uint32_t take = std::min(frames - done, e.fifoFill - e.fifoRead);
-            std::memcpy(left + done, fifoL + e.fifoRead, take * sizeof(float));
-            std::memcpy(right + done, fifoR + e.fifoRead, take * sizeof(float));
+            for (std::uint32_t c = 0; c < outCount; ++c) std::memcpy(outs[c] + done, fifo[c] + e.fifoRead, take * sizeof(float));
             e.fifoRead += take;
             done += take;
         } else if (frames - done >= B) {
-            renderBlock(e, left + done, right + done);
+            for (std::uint32_t c = 0; c < outCount; ++c) at[c] = outs[c] + done;
+            renderBlock(e, at, outCount);
             done += B;
         } else {
-            renderBlock(e, fifoL, fifoR);
+            renderBlock(e, fifo, outCount);
             e.fifoRead = 0;
             e.fifoFill = B;
         }
@@ -1247,6 +1341,19 @@ extern "C" uint64_t ms_engine_render(ms_engine* engine, float* left, float* righ
     if (seconds > e.stats.max.load(std::memory_order_relaxed)) e.stats.max.store(seconds, std::memory_order_relaxed);
     return e.frame;
 }
+
+}  // namespace
+
+extern "C" uint64_t ms_engine_render(ms_engine* engine, float* left, float* right, uint32_t frames) {
+    float* outs[2] = {left, right};
+    return renderFrames(*engine, outs, 2, frames);
+}
+
+extern "C" uint64_t ms_engine_render_speakers(ms_engine* engine, float* const* channels, uint32_t frames) {
+    return renderFrames(*engine, channels, engine->speakers ? engine->speakers : 2, frames);
+}
+
+extern "C" uint32_t ms_engine_output_channels(const ms_engine* engine) { return engine->speakers ? engine->speakers : 2; }
 
 extern "C" uint64_t ms_engine_render_interleaved(ms_engine* engine, float* stereo, uint32_t frames) {
     float left[1024], right[1024];

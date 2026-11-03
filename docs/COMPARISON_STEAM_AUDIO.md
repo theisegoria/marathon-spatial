@@ -19,13 +19,13 @@ The right-hand column states what this project intends and whether it has landed
 | Platforms | Windows, Linux, macOS, Android, iOS ([README][sa-repo]) | macOS 27 or later on Apple M3 or later, only |
 | Engines and middleware | Unity, Unreal Engine, FMOD Studio, Wwise ([README][sa-repo]) | None. A C API and Swift, so you write the integration |
 | Maturity | Public since 2017, with a long release history ([releases][sa-releases]) | Pre-release |
-| Speaker layouts | Mono to 7.1 and custom layouts ([`phonon.h`][sa-header]) | Stereo. Headphones are the focus |
 
 ## Where the two share an approach
 
 | Feature | Steam Audio | Marathon Spatial |
 |---|---|---|
 | Licence | Apache-2.0 ([licence][sa-licence]) | Apache-2.0 |
+| Speaker layouts | Mono to 7.1 and custom layouts ([`phonon.h`][sa-header]) | Mono to 7.1.4 and custom, with height: VBAP for sources and an AllRAD decoder for the ambisonic mix |
 | HRTF rendering | Built-in HRTF or a custom SOFA file ([HRTF][sa-hrtf]) | A choice of HRTF sets |
 | Direct path | Distance attenuation, air absorption, directivity, occlusion, transmission ([simulation][sa-sim]) | The same set |
 | Ambisonics | Encode, rotate, decode to binaural or speakers, with order set at creation ([decode effect][sa-ambi]) | Higher-order beds decoded through the same HRTFs |

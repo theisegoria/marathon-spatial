@@ -26,6 +26,7 @@
 #include "core/Dsp.hpp"
 #include "core/Engine.hpp"
 #include "core/Fft.hpp"
+#include "core/Speakers.hpp"
 #include "core/WorkgroupJoin.hpp"
 #include "hrtf/HrtfSet.hpp"
 #include "marathon_spatial/marathon_spatial.h"
@@ -2057,6 +2058,209 @@ void testBudget() {
     }
 }
 
+// Energy per channel of a speaker render of one source or bed.
+std::vector<double> speakerEnergy(const ms_speaker_layout& layout, ms_vec3 position, bool bed, ms_quat head, std::uint32_t frames,
+                                  std::vector<std::vector<float>>* keep = nullptr, std::uint32_t chunk = 0) {
+    ms_engine_desc d;
+    ms_engine_desc_default(&d);
+    d.smoothing_seconds = 0.0f;
+    d.speakers = layout;
+    ms_engine* e = nullptr;
+    if (ms_engine_create(&d, &e) != MS_OK) std::abort();
+    std::vector<float> noise(frames * 4);
+    std::mt19937 rng(11);
+    std::normal_distribution<float> normal(0.0f, 0.1f);
+    ms_buffer b;
+    if (bed) {
+        // A first-order plane wave from position, as a direction in listener axes: AmbiX X front, Y left, Z up.
+        const float n = std::sqrt(position.x * position.x + position.y * position.y + position.z * position.z);
+        const float x = -position.z / n, y = -position.x / n, z = position.y / n;
+        for (std::uint32_t t = 0; t < frames; ++t) {
+            const float s = normal(rng);
+            noise[4 * t] = s;
+            noise[4 * t + 1] = s * y;
+            noise[4 * t + 2] = s * z;
+            noise[4 * t + 3] = s * x;
+        }
+        OK(ms_buffer_create(e, noise.data(), frames, 4, kRate, &b));
+        ms_bed bd;
+        OK(ms_bed_create(e, &bd));
+        OK(ms_bed_set_buffer(e, bd, b, 1));
+        OK(ms_bed_play(e, bd, 0));
+    } else {
+        for (std::uint32_t t = 0; t < frames; ++t) noise[t] = normal(rng);
+        OK(ms_buffer_create(e, noise.data(), frames, 1, kRate, &b));
+        ms_source s;
+        OK(ms_source_create(e, &s));
+        const ms_source_params p = plainParams(position);
+        OK(ms_source_set_params(e, s, &p));
+        OK(ms_source_set_buffer(e, s, b, 0, 1));
+        OK(ms_source_play(e, s, 0));
+    }
+    ms_head_set_orientation(e, head);
+    OK(ms_engine_commit(e));
+    const std::uint32_t n = ms_engine_output_channels(e);
+    std::vector<std::vector<float>> out(n, std::vector<float>(frames));
+    std::vector<float*> pointers(n);
+    for (std::uint32_t done = 0; done < frames;) {
+        const std::uint32_t take = chunk ? std::min(chunk, frames - done) : frames;
+        for (std::uint32_t c = 0; c < n; ++c) pointers[c] = out[c].data() + done;
+        ms_engine_render_speakers(e, pointers.data(), take);
+        done += take;
+    }
+    ms_engine_destroy(e);
+    std::vector<double> energy(n, 0.0);
+    for (std::uint32_t c = 0; c < n; ++c)
+        for (std::uint32_t t = 1024; t < frames; ++t) energy[c] += static_cast<double>(out[c][t]) * out[c][t];
+    if (keep) *keep = std::move(out);
+    return energy;
+}
+
+void testSpeakers() {
+    gTest = "speakers";
+    const std::pair<ms_speaker_preset, std::uint32_t> presets[] = {{MS_SPEAKERS_MONO, 1}, {MS_SPEAKERS_STEREO, 2}, {MS_SPEAKERS_QUAD, 4},
+                                                                   {MS_SPEAKERS_5_1, 6},  {MS_SPEAKERS_7_1, 8},     {MS_SPEAKERS_5_1_4, 10},
+                                                                   {MS_SPEAKERS_7_1_4, 12}};
+    std::mt19937 rng(5);
+    std::normal_distribution<float> normal;
+    for (const auto& [preset, count] : presets) {
+        ms_speaker_layout layout;
+        OK(ms_speaker_layout_preset(preset, &layout));
+        CHECK(layout.count == count, "preset %d has %u speakers", preset, layout.count);
+        core::SpeakerLayout built;
+        CHECK(built.build(layout, 3), "preset %d builds", preset);
+        float gains[core::kMaxSpeakers];
+        // A source at a speaker plays from that speaker alone.
+        double worstAt = 0.0;
+        for (std::uint32_t s = 0; s < layout.count; ++s) {
+            if (layout.speakers[s].lfe) continue;
+            built.pan(core::speakerDirection(layout.speakers[s].azimuth_degrees, layout.speakers[s].elevation_degrees), gains);
+            for (std::uint32_t k = 0; k < layout.count; ++k) worstAt = std::max(worstAt, std::fabs(static_cast<double>(gains[k]) - (k == s ? 1.0 : 0.0)));
+        }
+        CHECK(worstAt < 1e-4, "preset %d: a source at a speaker spills %.2e", preset, worstAt);
+        // Energy is one from everywhere, and the LFE takes none.
+        double worstEnergy = 0.0, worstAngle = 0.0, lfe = 0.0;
+        for (int trial = 0; trial < 2000; ++trial) {
+            const core::Vec3 d = core::normalized(core::Vec3{normal(rng), normal(rng), normal(rng)});
+            built.pan(d, gains);
+            double energy = 0.0;
+            for (std::uint32_t k = 0; k < layout.count; ++k) {
+                energy += gains[k] * gains[k];
+                if (layout.speakers[k].lfe) lfe += std::fabs(gains[k]);
+            }
+            worstEnergy = std::max(worstEnergy, std::fabs(energy - 1.0));
+        }
+        // On a ring, the panned image (the gain-weighted sum of speaker directions) points where the source is, wherever two neighbours
+        // hold it between them: everywhere on the horizon but behind a stereo pair.
+        if (preset != MS_SPEAKERS_MONO && preset != MS_SPEAKERS_5_1_4 && preset != MS_SPEAKERS_7_1_4) {
+            for (int a = -180; a < 180; ++a) {
+                if (preset == MS_SPEAKERS_STEREO && std::abs(a) > 30) continue;
+                const core::Vec3 d = core::speakerDirection(static_cast<float>(a), 0.0f);
+                built.pan(d, gains);
+                core::Vec3 image{};
+                for (std::uint32_t k = 0; k < layout.count; ++k)
+                    if (!layout.speakers[k].lfe)
+                        image = image + core::speakerDirection(layout.speakers[k].azimuth_degrees, layout.speakers[k].elevation_degrees) * gains[k];
+                worstAngle = std::max(worstAngle, std::acos(std::clamp(static_cast<double>(core::dot(core::normalized(image), d)), -1.0, 1.0)) * 180.0 / M_PI);
+            }
+        }
+        std::printf("  %2u speakers: energy within %.1e of one, image within %.2f degrees on the horizon\n", layout.count, worstEnergy, worstAngle);
+        CHECK(worstEnergy < 1e-4 && lfe == 0.0 && worstAngle < 0.5, "preset %d pans", preset);
+
+        // AllRAD at order 3: a plane wave from anywhere carries about the same energy, and the image (energy vector) points the right way.
+        float encode[core::kMaxChannels];
+        // 5.1 leaves 140 degrees open behind; its image is measured over the front half, where its speakers are.
+        const bool irregular = preset == MS_SPEAKERS_5_1 || preset == MS_SPEAKERS_5_1_4;
+        double lowest = INFINITY, highest = 0.0, worstImage = 0.0;
+        for (int trial = 0; trial < 400; ++trial) {
+            const float az = static_cast<float>(trial % 40) * 9.0f, el = preset == MS_SPEAKERS_5_1_4 || preset == MS_SPEAKERS_7_1_4 ? static_cast<float>(trial / 40) * 5.0f : 0.0f;
+            const core::Vec3 d = core::speakerDirection(az, el);
+            core::encodeDirection(core::headToAmbisonic(d), 3, encode);
+            double energy = 0.0;
+            core::Vec3 image{};
+            for (std::uint32_t k = 0; k < layout.count; ++k) {
+                const float* row = built.decodeRow(k);
+                double feed = 0.0;
+                for (std::uint32_t c = 0; c < built.decodeChannels(); ++c) feed += row[c] * encode[c];
+                energy += feed * feed;
+                if (!layout.speakers[k].lfe)
+                    image = image + core::speakerDirection(layout.speakers[k].azimuth_degrees, layout.speakers[k].elevation_degrees) * static_cast<float>(feed * feed);
+            }
+            lowest = std::min(lowest, energy);
+            highest = std::max(highest, energy);
+            if (preset != MS_SPEAKERS_MONO && preset != MS_SPEAKERS_STEREO && (!irregular || az <= 90.0f || az >= 270.0f))
+                worstImage = std::max(worstImage, std::acos(std::clamp(static_cast<double>(core::dot(core::normalized(image), d)), -1.0, 1.0)) * 180.0 / M_PI);
+        }
+        const double spread = 10.0 * std::log10(highest / lowest);
+        std::printf("     decoder: plane-wave energy spread %.2f dB, energy image within %.1f degrees%s\n", spread, worstImage, irregular ? " in front" : "");
+        if (preset != MS_SPEAKERS_MONO && preset != MS_SPEAKERS_STEREO) CHECK(spread < 4.0 && worstImage < 15.0, "preset %d decodes", preset);
+    }
+    ms_speaker_layout bad{};
+    bad.count = 2;
+    bad.speakers[0] = {0, 0, 1};
+    bad.speakers[1] = {0, 0, 1};
+    float gains[core::kMaxSpeakers];
+    CHECK(ms_speaker_layout_pan(&bad, {0, 0, -1}, gains) == MS_ERR_INVALID_ARGUMENT, "a layout of LFE alone is refused");
+
+    // The engine on 5.1: a source in front plays from the centre, one at 110 degrees left from the left surround, and the LFE stays silent.
+    ms_speaker_layout surround;
+    OK(ms_speaker_layout_preset(MS_SPEAKERS_5_1, &surround));
+    const auto loudest = [](const std::vector<double>& energy) { return static_cast<std::uint32_t>(std::max_element(energy.begin(), energy.end()) - energy.begin()); };
+    const std::vector<double> front = speakerEnergy(surround, {0, 0, -2}, false, {0, 0, 0, 1}, 9600);
+    CHECK(loudest(front) == 2 && front[3] == 0.0, "front source: loudest %u, LFE %g", loudest(front), front[3]);
+    double others = 0.0;
+    for (std::uint32_t k = 0; k < front.size(); ++k) others += k == 2 ? 0.0 : front[k];
+    CHECK(others < 1e-6 * front[2], "a source on the centre speaker leaks %.2e into the others", others / front[2]);
+    const core::Vec3 left = core::speakerDirection(110.0f, 0.0f) * 2.0f;
+    const std::vector<double> surroundLeft = speakerEnergy(surround, {left.x, left.y, left.z}, false, {0, 0, 0, 1}, 9600);
+    CHECK(loudest(surroundLeft) == 4, "a source at 110 degrees left plays from the left surround, not %u", loudest(surroundLeft));
+    // Turning the head changes nothing: the speakers stand in the room.
+    const float h = std::sqrt(0.5f);
+    const std::vector<double> turned = speakerEnergy(surround, {0, 0, -2}, false, {0, h, 0, h}, 9600);
+    double change = 0.0;
+    for (std::uint32_t k = 0; k < front.size(); ++k) change = std::max(change, std::fabs(turned[k] - front[k]));
+    CHECK(change == 0.0, "head orientation moved the speaker image by %g", change);
+    // A first-order bed from the left decodes onto the left speakers.
+    const std::vector<double> bedLeft = speakerEnergy(surround, {-1, 0, 0}, true, {0, 0, 0, 1}, 9600);
+    CHECK(bedLeft[0] > bedLeft[1] && bedLeft[4] > bedLeft[5] && bedLeft[3] == 0.0, "bed from the left: L %g R %g Ls %g Rs %g", bedLeft[0], bedLeft[1], bedLeft[4], bedLeft[5]);
+    // Chunking does not change a sample.
+    std::vector<std::vector<float>> whole, pieces;
+    (void)speakerEnergy(surround, {1, 0.5f, -2}, false, {0, 0, 0, 1}, 9600, &whole);
+    (void)speakerEnergy(surround, {1, 0.5f, -2}, false, {0, 0, 0, 1}, 9600, &pieces, 77);
+    CHECK(whole == pieces, "speaker output depends on how frames are chunked");
+    // The stereo entry point on a speaker engine folds the same render down.
+    ms_engine_desc d;
+    ms_engine_desc_default(&d);
+    d.speakers = surround;
+    ms_engine* e = nullptr;
+    OK(ms_engine_create(&d, &e));
+    CHECK(ms_engine_output_channels(e) == 6, "5.1 renders six channels");
+    std::vector<float> noise(4800);
+    for (float& v : noise) v = 0.1f * normal(rng);
+    ms_buffer b;
+    ms_source s;
+    OK(ms_buffer_create(e, noise.data(), noise.size(), 1, kRate, &b));
+    OK(ms_source_create(e, &s));
+    const ms_source_params p = plainParams({-2, 0, 0});
+    OK(ms_source_set_params(e, s, &p));
+    OK(ms_source_set_buffer(e, s, b, 0, 1));
+    OK(ms_source_play(e, s, 0));
+    OK(ms_engine_commit(e));
+    Render folded = renderFrames(e, 4800);
+    double fl = 0.0, fr = 0.0;
+    for (std::size_t t = 1024; t < folded.l.size(); ++t) {
+        fl += folded.l[t] * folded.l[t];
+        fr += folded.r[t] * folded.r[t];
+    }
+    CHECK(fl > 100.0 * fr && fl > 0.0, "a source on the left folds down to the left: %g against %g", fl, fr);
+    ms_engine_destroy(e);
+    ms_engine_desc_default(&d);
+    d.speakers.count = 2;
+    d.speakers.speakers[0] = {0, 0, 1};
+    d.speakers.speakers[1] = {10, 0, 1};
+    CHECK(ms_engine_create(&d, &e) == MS_ERR_INVALID_ARGUMENT, "a layout of LFE channels alone is refused");
+}
+
 }  // namespace
 
 int main(int argumentCount, char** arguments) {
@@ -2106,6 +2310,7 @@ int main(int argumentCount, char** arguments) {
     run("distance and air", testDistanceAndAir);
     run("near field", testNearField);
     run("ambisonics", testAmbisonics);
+    run("speakers", testSpeakers);
     run("moving source", testMovingSourceStaysClean);
     run("voice overflow", testVoiceOverflow);
     run("master gain", testMasterGain);

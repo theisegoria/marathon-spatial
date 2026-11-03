@@ -22,6 +22,8 @@ Spatial Studio, a native macOS 27 app.
   response for convolution, and a feedback network carries the tail on at the level the field reached
 - Late reverb per room, driven by real room volume and absorption, coupled through portals
 - Higher-order ambisonic beds decoded through the same HRTFs
+- Loudspeaker layouts from mono to 7.1.4 or your own: sources pan between speakers (VBAP), and the ambisonic mix with beds and
+  reflections decodes to the layout (AllRAD, max-rE)
 - Head tracking from any tracker you feed it
 - One render path for live and offline, with bit-identical output however frames are chunked
 
@@ -134,6 +136,7 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Head tracking from headphone sensors | In the tree. Not yet checked on real headphones |
 | Marathon Spatial Studio | Builds on the library, with offline render tests. Used and listened to on macOS 27 |
 | Bundled measured HRTF sets | Four sets in [`data/hrtf`](data/hrtf/PROVENANCE.md) |
+| Loudspeaker layouts: VBAP panning and an AllRAD decoder, mono to 7.1.4 and custom | In the tree, with CPU tests; through the C API |
 | Stereo speaker path | In Studio: an equal-power pan with distance gain and no reflections |
 
 Tests measure cues, levels and timing, and the author has listened to the result on headphones through Studio.

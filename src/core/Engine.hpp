@@ -14,6 +14,7 @@
 #include "Common.hpp"
 #include "Dsp.hpp"
 #include "Fft.hpp"
+#include "Speakers.hpp"
 #include "hrtf/HrtfSet.hpp"
 
 namespace mspatial::core {
@@ -132,6 +133,8 @@ struct RenderSource {
     float encode[kMaxChannels];
     float encodeWeight;
     float peak;
+    float speakerGain[kMaxSpeakers];  // Last panning gains on a speaker layout.
+    bool haveSpeakerGain;
 };
 
 struct RenderBed {
@@ -248,7 +251,11 @@ struct ms_engine {
     const mspatial::core::AmbisonicDecoder* previousDecoder{};
     mspatial::hrtf::HrtfSet* retiringSet{};
     mspatial::core::Aligned<float> fifo;
-    std::uint32_t fifoRead{}, fifoFill{};
+    std::uint32_t fifoRead{}, fifoFill{}, fifoChannels{2};
+    // Speakers: 0 for headphones. The mix holds one channel per speaker, past the buses, before the master's gain.
+    std::uint32_t speakers{};
+    mspatial::core::SpeakerLayout layout;
+    mspatial::core::Aligned<float> speakerMix;
     float limiterGain{1.0f};
     float airTable[2]{};   // Shelf gains in dB per metre
     std::uint64_t opForward{}, opInverse{}, opSpectrum{}, opReal{}, opUpdates{};

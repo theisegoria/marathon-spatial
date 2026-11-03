@@ -160,6 +160,40 @@ const char* ms_status_string(ms_status status) {
     return "unknown";
 }
 
+ms_status ms_speaker_layout_preset(ms_speaker_preset preset, ms_speaker_layout* layout) {
+    if (!layout) return MS_ERR_INVALID_ARGUMENT;
+    *layout = ms_speaker_layout{};
+    const auto add = [&](float azimuth, float elevation, bool lfe = false) {
+        layout->speakers[layout->count++] = {azimuth, elevation, lfe ? 1u : 0u};
+    };
+    const auto front = [&] {
+        add(30, 0);
+        add(-30, 0);
+        add(0, 0);
+        add(0, 0, true);
+    };
+    switch (preset) {
+    case MS_SPEAKERS_MONO: add(0, 0); break;
+    case MS_SPEAKERS_STEREO: add(30, 0); add(-30, 0); break;
+    case MS_SPEAKERS_QUAD: add(45, 0); add(-45, 0); add(135, 0); add(-135, 0); break;
+    case MS_SPEAKERS_5_1: front(); add(110, 0); add(-110, 0); break;
+    case MS_SPEAKERS_7_1: front(); add(90, 0); add(-90, 0); add(135, 0); add(-135, 0); break;
+    case MS_SPEAKERS_5_1_4: front(); add(110, 0); add(-110, 0); add(30, 30); add(-30, 30); add(110, 30); add(-110, 30); break;
+    case MS_SPEAKERS_7_1_4: front(); add(90, 0); add(-90, 0); add(135, 0); add(-135, 0); add(45, 30); add(-45, 30); add(135, 30); add(-135, 30); break;
+    default: return MS_ERR_INVALID_ARGUMENT;
+    }
+    return MS_OK;
+}
+
+ms_status ms_speaker_layout_pan(const ms_speaker_layout* layout, ms_vec3 direction, float* gains) {
+    if (!layout || !gains) return MS_ERR_INVALID_ARGUMENT;
+    mspatial::core::SpeakerLayout built;
+    if (!built.build(*layout, 0)) return MS_ERR_INVALID_ARGUMENT;
+    // Listener axes to head axes: the same at the identity listener, with -Z forward.
+    built.pan(mspatial::core::Vec3(direction), gains);
+    return MS_OK;
+}
+
 void ms_engine_desc_default(ms_engine_desc* d) {
     *d = ms_engine_desc{};
     d->api_version = MS_API_VERSION;
@@ -236,7 +270,12 @@ ms_status ms_engine_create(const ms_engine_desc* desc, ms_engine** engine) {
         e.buses.reset(d.max_buses);
         e.ranking.reset(d.max_sources);
         e.scratch.reset(16ull * B + kMaxFilterTaps + 64);
-        e.fifo.reset(2ull * B);
+        if (d.speakers.count > 0) {
+            if (!e.layout.build(d.speakers, d.ambisonic_order)) return MS_ERR_INVALID_ARGUMENT;
+            e.speakers = e.layout.count();
+            e.speakerMix.reset(static_cast<std::size_t>(e.speakers) * B);
+        }
+        e.fifo.reset(static_cast<std::size_t>(std::max(e.speakers, 2u)) * B);
         e.crossfadeRamp.reset(B);
         for (std::uint32_t t = 0; t < B; ++t) {
             const float s = std::sin(0.5f * kPi * (static_cast<float>(t) + 0.5f) / static_cast<float>(B));

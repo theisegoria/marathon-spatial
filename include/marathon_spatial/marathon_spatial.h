@@ -36,6 +36,7 @@ extern "C" {
 #define MS_MAX_AMBISONIC_ORDER 7u
 #define MS_MAX_SENDS 2u
 #define MS_MAX_REFLECTION_TAPS 24u
+#define MS_MAX_SPEAKERS 32u
 
 typedef enum ms_status {
     MS_OK = 0,
@@ -62,6 +63,40 @@ typedef uint32_t ms_bus;
 typedef uint32_t ms_bed;
 #define MS_BUS_MASTER ((ms_bus)1u)
 
+/* Loudspeakers
+ *
+ * Without a layout the engine renders binaural stereo for headphones. With one it renders a channel per speaker: spatial sources pan
+ * between the nearest speakers (vector base amplitude panning), and the ambisonic mix, which carries beds, reflections and the voices past
+ * max_hrtf_voices, is decoded to the layout by AllRAD with max-rE weighting. The stereo master (pan sources, bus effects) plays as a phantom
+ * pair at +-30 degrees. Head orientation is ignored: speakers stand still in the room.
+ * Azimuth is in degrees anticlockwise from the front, so +30 is front left; elevation is up from ear height. LFE channels are left silent.
+ * Presets follow ITU-R BS.2051 angles in the usual channel order (L R C LFE, then surrounds, then heights). */
+typedef struct ms_speaker {
+    float azimuth_degrees;
+    float elevation_degrees;
+    uint32_t lfe;  /* Nonzero for a low-frequency channel, which takes no panning. */
+} ms_speaker;
+
+typedef struct ms_speaker_layout {
+    uint32_t count;
+    ms_speaker speakers[MS_MAX_SPEAKERS];
+} ms_speaker_layout;
+
+typedef enum ms_speaker_preset {
+    MS_SPEAKERS_MONO = 0,
+    MS_SPEAKERS_STEREO = 1,   /* L R at +-30 */
+    MS_SPEAKERS_QUAD = 2,     /* FL FR RL RR at +-45, +-135 */
+    MS_SPEAKERS_5_1 = 3,      /* L R C LFE Ls Rs; surrounds at +-110 */
+    MS_SPEAKERS_7_1 = 4,      /* L R C LFE Lss Rss Lrs Rrs; sides +-90, rears +-135 */
+    MS_SPEAKERS_5_1_4 = 5,    /* 5.1, then heights at +-30 and +-110, 30 degrees up */
+    MS_SPEAKERS_7_1_4 = 6     /* 7.1, then heights at +-45 and +-135, 30 degrees up */
+} ms_speaker_preset;
+
+ms_status ms_speaker_layout_preset(ms_speaker_preset preset, ms_speaker_layout* layout);
+/* The panning gains the engine would give a direction, one per speaker, energy normalised. direction is in listener axes (+X right, +Y up,
+   -Z forward). MS_ERR_INVALID_ARGUMENT for a layout the engine would refuse: none of it pannable, two speakers within a degree, too many. */
+ms_status ms_speaker_layout_pan(const ms_speaker_layout* layout, ms_vec3 direction, float* gains);
+
 /* Engine */
 
 typedef struct ms_engine_desc {
@@ -79,6 +114,7 @@ typedef struct ms_engine_desc {
     float air_temperature_c;    /* ISO 9613-1 air absorption */
     float air_humidity_percent;
     uint32_t limiter;           /* Nonzero: a master peak limiter at 0 dBFS. Off keeps measurements linear. */
+    ms_speaker_layout speakers; /* count 0 for headphones; see ms_speaker_layout_preset. */
 } ms_engine_desc;
 
 void ms_engine_desc_default(ms_engine_desc* desc);
@@ -102,6 +138,11 @@ ms_status ms_engine_set_block_callback(ms_engine* engine, ms_block_callback call
 /* Renders exactly frames samples per channel into caller memory. Real-time safe. Returns the frame position after. */
 uint64_t ms_engine_render(ms_engine* engine, float* left, float* right, uint32_t frames);
 uint64_t ms_engine_render_interleaved(ms_engine* engine, float* stereo, uint32_t frames);
+/* One channel per speaker of the engine's layout, in layout order. ms_engine_render on a speaker engine gives a stereo fold-down of the
+   same render instead. Use one of the two per engine: a partial block left over from one is dropped by the other. Real-time safe. */
+uint64_t ms_engine_render_speakers(ms_engine* engine, float* const* channels, uint32_t frames);
+/* 2 for headphones, else the layout's speaker count. */
+uint32_t ms_engine_output_channels(const ms_engine* engine);
 
 /* The total latency of the direct path in frames, excluding any device latency. A set resampled to the engine's rate adds
    a further 8 frames' worth at 48 kHz (167 microseconds) to every direction alike. */
