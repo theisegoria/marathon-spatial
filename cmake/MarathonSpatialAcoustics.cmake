@@ -10,6 +10,7 @@ add_library(marathon_spatial_acoustics STATIC
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticsCApi.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/Convolver.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/CpuTraceBackend.cpp
+    ${MARATHON_SPATIAL_ROOT}/src/acoustics/Diffraction.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/EnergyField.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/LateReverb.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/MetalTraceBackend.mm

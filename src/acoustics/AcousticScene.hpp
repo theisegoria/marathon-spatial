@@ -27,6 +27,13 @@ struct Facet {
     Box bounds;
 };
 
+// An edge that can diffract: where two faces meet at an angle, or a free edge of a thin surface. Object space. h1 and h2 are unit vectors
+// perpendicular to the edge, lying in each face and pointing away from the edge into it; a free edge has h2 == h1.
+struct DiffractionEdge {
+    Vec3 a = vec3(0, 0, 0), b = vec3(0, 0, 0);
+    Vec3 h1 = vec3(1, 0, 0), h2 = vec3(1, 0, 0);
+};
+
 struct Mesh {
     std::vector<Vec3> vertices;
     std::vector<std::uint32_t> indices;
@@ -35,6 +42,8 @@ struct Mesh {
     Bvh bvh;
     Box bounds;
     std::uint64_t serial = 0;  // Unique per addMesh, so a reused slot reads as a new mesh.
+    std::vector<DiffractionEdge> edges;
+    Bvh edgeBvh;
     bool live = false;
 };
 

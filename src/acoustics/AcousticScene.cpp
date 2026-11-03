@@ -1,4 +1,5 @@
 #include "acoustics/AcousticScene.hpp"
+#include "acoustics/Diffraction.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -244,6 +245,7 @@ std::uint32_t Scene::addMesh(const MeshDesc& desc) {
     }
     if (mesh.facets.empty()) mesh.facets.emplace_back();
     mesh.bvh.build(boxes);
+    extractDiffractionEdges(mesh);
 
     ++meshRevision_;
     mesh.serial = meshRevision_;

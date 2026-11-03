@@ -12,6 +12,7 @@
 
 #include "acoustics/AcousticSnapshot.hpp"
 #include "acoustics/AcousticTrace.hpp"
+#include "acoustics/Diffraction.hpp"
 #include "acoustics/EnergyField.hpp"
 #include "acoustics/RoomAcoustics.hpp"
 
@@ -67,6 +68,10 @@ struct SimulatorConfig {
     // The listener's traced energy field, for convolution reverb. paths = 0 leaves it off; its rays take at most half of what the
     // direct and room rays leave, so early reflections always keep a share.
     EnergyTracerConfig energy{.paths = 0};
+    // Edge diffraction for sources whose direct line is blocked. Each such source checks this many paths a tick, one ray per leg.
+    bool diffraction = true;
+    std::uint32_t diffractionChecksPerSource = 3;
+    DiffractionConfig bends{};
 };
 
 class Simulator {
@@ -101,6 +106,13 @@ private:
         bool visible = false;
         bool retiring = false;  // Lost its place to a stronger path: it only fades from here.
     };
+    struct BendSlot {
+        std::uint64_t id = 0;
+        DiffractionPath path;
+        Bands smoothed{};
+        std::uint32_t misses = 0;
+        bool visible = false;
+    };
     struct SourceState {
         SourceDesc desc;
         bool active = false;
@@ -113,6 +125,12 @@ private:
         float visibilityTarget = 1.f;
         float visibility = 1.f;
         std::array<PathSlot, kMaxPathsPerSource> slots;
+        std::array<BendSlot, kMaxDiffractionPaths> bends;
+    };
+    struct BendJob {
+        std::uint32_t source, generation, firstRay, rays;
+        DiffractionPath path;
+        std::uint32_t slot;  // The slot it confirms, or kNone for a new candidate.
     };
     struct PathJob {
         std::uint32_t source, generation, firstRay;
@@ -132,6 +150,7 @@ private:
         std::vector<SampleJob> portals, probes;
         std::vector<Vec3> probeDirections;
         std::vector<EnergyJob> energy;
+        std::vector<BendJob> bends;
         std::uint32_t discovery = 0;
     };
     struct ProbeSample {
@@ -155,6 +174,8 @@ private:
     void consume(const TraceBatch& batch);
     void consumePaths(const TraceBatch& batch, const Jobs& jobs);
     void consumeDirect(const TraceBatch& batch, const Jobs& jobs);
+    void prepareBends(TraceBatch& batch, Jobs& jobs);
+    void consumeBends(const TraceBatch& batch, const Jobs& jobs);
     void consumeSamples(const TraceBatch& batch, const Jobs& jobs);
     void consumeDiscovery(const TraceBatch& batch, const Jobs& jobs);
     void rememberSequence(const PathKey& key);

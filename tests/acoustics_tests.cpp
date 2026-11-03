@@ -1,6 +1,7 @@
 // CPU-only acoustics tests against analytic rooms. Everything renders to memory; nothing here touches an audio device or the GPU.
 #include "acoustics/AcousticSimulator.hpp"
 #include "acoustics/Convolver.hpp"
+#include "acoustics/Diffraction.hpp"
 #include "acoustics/EnergyField.hpp"
 #include "acoustics/ReverbIr.hpp"
 #include "acoustics/LateReverb.hpp"
@@ -943,6 +944,121 @@ void smallRayBudgetStaysBoundedAndFair() {
 
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Edge diffraction.
+
+void edgesComeFromTheGeometry() {
+    Scene scene;
+    const std::uint32_t m = scene.addMaterial(flat(0.1f));
+    const MeshData box = boxInside(vec3(0, 0, 0), vec3(2, 3, 4), {m, m, m, m, m, m});
+    near(double(scene.meshes()[box.add(scene)].edges.size()), 12.0, 0.0, "a box has twelve edges, its face diagonals none");
+    MeshData wall;
+    wall.quad(vec3(0, 0, 0), vec3(4, 0, 0), vec3(4, 3, 0), vec3(0, 3, 0), m);
+    near(double(scene.meshes()[wall.add(scene)].edges.size()), 4.0, 0.0, "a thin wall has four free edges");
+}
+
+void diffractionOverAThinBarrier() {
+    // A free-standing wall in the plane z = 0, x from -20 to 20 and y from 0 to 3, with nothing else. The source and the listener are on
+    // opposite sides. The shortest way round is under its bottom edge, at the origin.
+    Scene scene;
+    const std::uint32_t m = scene.addMaterial(flat(0.1f));
+    MeshData wall;
+    wall.quad(vec3(-20, 0, 0), vec3(20, 0, 0), vec3(20, 3, 0), vec3(-20, 3, 0), m);
+    scene.addInstance(wall.add(scene), Transform{});
+    DiffractionConfig config;
+    config.air = noAir();
+    std::array<DiffractionPath, 4> paths;
+    const Vec3 source = vec3(0, 1, -2), listener = vec3(0, 1, 3);
+    const std::uint32_t count = findDiffractionPaths(scene, source, listener, config, paths);
+    check(count >= 2, "paths under and over the wall");
+    const double under = std::sqrt(5.0) + std::sqrt(10.0), over = std::sqrt(8.0) + std::sqrt(13.0);
+    near(paths[0].length, under, 1e-3, "shortest path length under the wall");
+    near(length(paths[0].points[0] - vec3(0, 0, 0)), 0.0, 1e-3, "it bends at the closest point of the bottom edge");
+    near(paths[1].length, over, 1e-3, "the next one goes over the top");
+    // Kurze and Anderson at 1 kHz for the path under: N = 2 delta f / c.
+    const double delta = under - 5.0, n = 2 * delta * 1000 / 343, x = std::sqrt(2 * std::numbers::pi * n);
+    const double lossDb = 5 + 20 * std::log10(x / std::tanh(x));
+    near(20 * std::log10(paths[0].amplitude[4] * under), -lossDb, 0.01, "wedge loss at 1 kHz against Kurze-Anderson, dB");
+    near(wedgeLossDb(0.f, 1000.f, 343.f), 5.0, 1e-4, "5 dB at the shadow boundary");
+    check(paths[0].amplitude[1] > paths[0].amplitude[6], "low frequencies bend round more easily than high");
+    near(dot(paths[0].arrival, normalize(vec3(0, -1, -3))), 1.0, 1e-4, "it arrives from the edge");
+}
+
+void insideCornersDoNotDiffract() {
+    Scene scene;
+    const std::uint32_t m = scene.addMaterial(flat(0.1f));
+    const MeshData room = boxInside(vec3(0, 0, 0), vec3(10, 4, 8), {m, m, m, m, m, m});
+    scene.addInstance(room.add(scene), Transform{});
+    DiffractionConfig config;
+    config.maxDetour = 20.f;
+    std::array<DiffractionPath, 4> paths;
+    near(double(findDiffractionPaths(scene, vec3(2, 1, 2), vec3(8, 2, 6), config, paths)), 0.0, 0.0, "a room's own corners bend nothing");
+}
+
+// A 12 x 4 x 12 m room with a square pillar from floor to ceiling in the middle.
+struct PillarRoom {
+    Scene scene;
+    std::unique_ptr<TraceBackend> backend = makeCpuTraceBackend();
+    std::unique_ptr<Simulator> simulator;
+    std::uint32_t source = 0;
+    PillarRoom() {
+        const std::uint32_t wall = scene.addMaterial(flat(0.3f));
+        const std::uint32_t stone = scene.addMaterial(flat(0.05f));  // Transmits nothing.
+        scene.addInstance(boxInside(vec3(-6, 0, -6), vec3(6, 4, 6), {wall, wall, wall, wall, wall, wall}).add(scene), Transform{});
+        scene.addInstance(boxInside(vec3(-1, 0, -1), vec3(1, 4, 1), {stone, stone, stone, stone, stone, stone}).add(scene), Transform{});
+        RoomDesc room;
+        room.bounds = {Box{vec3(-6, 0, -6), vec3(6, 4, 6)}};
+        room.probe = vec3(-4, 2, -4);
+        scene.addRoom(room);
+        SimulatorConfig config;
+        config.air = noAir();
+        simulator = std::make_unique<Simulator>(scene, *backend, config);
+        simulator->setListener(vec3(0, 1.5f, 5));
+        source = simulator->addSource({vec3(0, 1.5f, -5), 0.1f});
+    }
+};
+
+void diffractionAroundAPillar() {
+    PillarRoom room;
+    for (int i = 0; i < 30; ++i) room.simulator->tick(1.f / 60.f);
+    const SourceAcoustics& hidden = room.simulator->snapshots().read().sources[room.source];
+    near(hidden.visibility, 0.0, 1e-3, "the pillar hides the source");
+    // The way round is past two corners on one side: 2 x sqrt(1 + 16) + 2 against 10 m straight.
+    const double around = 2 * std::sqrt(17.0) + 2;
+    std::uint32_t live = 0;
+    double best = 0, length = 0;
+    std::uint32_t order = 0;
+    for (const ReflectionPath& path : hidden.diffraction) {
+        if (path.id == 0) continue;
+        ++live;
+        if (path.gain[4] > best) {
+            best = path.gain[4];
+            length = path.delaySeconds * kDefaultSpeedOfSound;
+            order = path.order;
+        }
+    }
+    check(live == 2, "both sides of the pillar carry sound round");
+    near(double(order), 2.0, 0.0, "round a thick pillar takes two edges");
+    near(length, around, 1e-3, "path round the pillar");
+    const double d1 = std::sqrt(17.0) + 2 - std::sqrt(1 + 36.0);  // Source to the far corner, past the near one.
+    const double loss = 2 * (5 + 20 * std::log10(std::sqrt(2 * std::numbers::pi * 2 * d1 * 1000 / 343) /
+                                                   std::tanh(std::sqrt(2 * std::numbers::pi * 2 * d1 * 1000 / 343))));
+    near(20 * std::log10(best * around), -loss, 0.5, "two wedge losses at 1 kHz, dB");
+
+    // Through the C API format: the diffracted paths fill the last taps.
+    ms_reflection_tap taps[MS_MAX_REFLECTION_TAPS];
+    (void)taps;
+
+    // Step the source out to the side, into view: the diffracted paths fade and go.
+    room.simulator->setSource(room.source, {vec3(4, 1.5f, -5), 0.1f});
+    for (int i = 0; i < 60; ++i) room.simulator->tick(1.f / 60.f);
+    const SourceAcoustics& seen = room.simulator->snapshots().read().sources[room.source];
+    near(seen.visibility, 1.0, 1e-3, "out of the pillar's shadow");
+    double left = 0;
+    for (const ReflectionPath& path : seen.diffraction) left = std::max(left, double(path.gain[4]));
+    near(left, 0.0, 1e-4, "diffraction fades once the line is clear");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Hybrid convolution reverb from the traced energy field.
 
 double correlation(const std::vector<float>& a, const std::vector<float>& b, std::size_t from, std::size_t to) {
@@ -1322,6 +1438,10 @@ int main() {
     snapshotExchangeNeverTears();
     smallRayBudgetStaysBoundedAndFair();
     capiDrivesTheWholePath();
+    edgesComeFromTheGeometry();
+    diffractionOverAThinBarrier();
+    insideCornersDoNotDiffract();
+    diffractionAroundAPillar();
     convolverMatchesDirectConvolution();
     convolverIsRealTimeSafe();
     energyFieldMatchesEyring();

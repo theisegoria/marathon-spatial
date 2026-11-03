@@ -62,7 +62,7 @@ struct ms_acoustics {
 namespace {
 
 static_assert(MS_ACOUSTIC_BANDS == kBandCount && MS_ACOUSTIC_MAX_SOURCES == kMaxSources && MS_ACOUSTIC_MAX_ROOMS == kMaxRooms);
-static_assert(MS_MAX_REFLECTION_TAPS == kMaxPathsPerSource, "a slot here is a slot in the engine");
+static_assert(MS_MAX_REFLECTION_TAPS == kMaxPathsPerSource + kMaxDiffractionPaths, "a slot here is a slot in the engine");
 static_assert(MS_ACOUSTIC_MAX_PORTAL_PATHS == kMaxPortalPaths);
 
 Vec3 toVec3(ms_vec3 v) { return vec3(v.x, v.y, v.z); }
@@ -278,7 +278,8 @@ uint32_t ms_acoustics_source_taps(const ms_acoustics* a, uint32_t source, ms_ref
     for (uint32_t i = 0; i < MS_MAX_REFLECTION_TAPS; ++i) {
         ms_reflection_tap tap{};
         if (view && view->active) {
-            const ReflectionPath& path = view->reflections[i];
+            // Early reflections first, then the diffracted paths in the last slots.
+            const ReflectionPath& path = i < kMaxPathsPerSource ? view->reflections[i] : view->diffraction[i - kMaxPathsPerSource];
             if (path.id != 0 && path.excessSeconds <= 0.17f) {
                 tap.delay_seconds = path.excessSeconds;
                 tap.direction = fromVec3(path.arrival);

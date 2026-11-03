@@ -167,6 +167,7 @@ void Simulator::prepare(TraceBatch& batch) {
     jobs.probes.clear();
     jobs.probeDirections.clear();
     jobs.energy.clear();
+    jobs.bends.clear();
     const TraceCapacity& capacity = backend_.capacity();
     const float eps = backend_.selfHitOffset();
 
@@ -223,6 +224,8 @@ void Simulator::prepare(TraceBatch& batch) {
             batch.layeredRays[batch.layeredCount++] = segment(listener_, line / span, eps, span);
         }
     }
+
+    if (config_.diffraction) prepareBends(batch, jobs);
 
     // The listener's energy field: one segment for each idle path, within half of what is left.
     if (energy_.enabled()) {
@@ -337,6 +340,7 @@ void Simulator::consume(const TraceBatch& batch) {
     consumeDiscovery(batch, jobs);
     consumePaths(batch, jobs);
     consumeDirect(batch, jobs);
+    consumeBends(batch, jobs);
     consumeSamples(batch, jobs);
 }
 
@@ -740,10 +744,111 @@ void Simulator::publish(float dt) {
             path.emission = slot.path.emission;
             path.order = slot.key.order;
         }
+        // Diffraction stands in for the part of the source that is hidden, so it fades as the source comes into view.
+        const float hidden = 1.f - source.visibility;
+        for (std::uint32_t k = 0; k < kMaxDiffractionPaths; ++k) {
+            BendSlot& slot = source.bends[k];
+            ReflectionPath& path = view.diffraction[k];
+            path = ReflectionPath{};
+            if (slot.id == 0) continue;
+            for (std::size_t b = 0; b < kBandCount; ++b)
+                slot.smoothed[b] += ((slot.visible ? slot.path.amplitude[b] * hidden : 0.f) - slot.smoothed[b]) * blend;
+            if ((!slot.visible || hidden < 1e-3f) && peak(slot.smoothed) < config_.minimumPathGain * 0.1f) {
+                slot = BendSlot{};
+                continue;
+            }
+            path.id = slot.id;
+            path.delaySeconds = slot.path.length / config_.speedOfSound;
+            path.excessSeconds = std::max(slot.path.length - view.distance, 0.f) / config_.speedOfSound;
+            path.gain = slot.smoothed;
+            path.arrival = slot.path.arrival;
+            path.emission = slot.path.emission;
+            path.order = slot.path.order;
+        }
         updatePortalPaths(s, view);
     }
     published_ = &out;
     exchange_.publish();
+}
+
+void Simulator::prepareBends(TraceBatch& batch, Jobs& jobs) {
+    const float eps = backend_.selfHitOffset();
+    const std::uint32_t capacity = backend_.capacity().closestRays;
+    std::array<DiffractionPath, kMaxDiffractionPaths + 2> found;
+    for (std::uint32_t s = 0; s < kMaxSources; ++s) {
+        SourceState& source = sources_[s];
+        if (!source.active) continue;
+        // Only a blocked line needs a way around. A source in plain view keeps its slots, which fade with its hidden share.
+        if (source.visibilityTarget >= 0.999f) continue;
+        const std::uint32_t count = findDiffractionPaths(scene_, source.desc.position, listener_, config_.bends,
+                                                         std::span(found).first(std::min<std::size_t>(found.size(), config_.diffractionChecksPerSource)));
+        // A kept path whose geometry is gone, or no longer among the best, goes dark; one still found takes the live geometry.
+        for (std::uint32_t k = 0; k < kMaxDiffractionPaths; ++k) {
+            BendSlot& slot = source.bends[k];
+            if (slot.id == 0) continue;
+            bool present = false;
+            for (std::uint32_t f = 0; f < count && !present; ++f) present = found[f].hash() == slot.id;
+            if (!present) slot.visible = false;
+        }
+        for (std::uint32_t f = 0; f < count; ++f) {
+            const DiffractionPath& path = found[f];
+            const std::uint32_t rays = path.order + 1;
+            if (batch.closestCount + rays > capacity) return;
+            std::uint32_t slot = kNone;
+            for (std::uint32_t k = 0; k < kMaxDiffractionPaths; ++k)
+                if (source.bends[k].id == path.hash()) slot = k;
+            if (slot != kNone) source.bends[slot].path = path;
+            BendJob job{s, source.generation, batch.closestCount, rays, path, slot};
+            Vec3 from = source.desc.position;
+            for (std::uint32_t leg = 0; leg < rays; ++leg) {
+                const Vec3 to = leg < path.order ? path.clear[leg] : listener_;
+                const float span = length(to - from);
+                batch.closestRays[batch.closestCount++] = segment(from, (to - from) / std::max(span, 1e-6f), eps, std::max(span - eps, eps));
+                from = to;
+            }
+            jobs.bends.push_back(job);
+        }
+    }
+}
+
+void Simulator::consumeBends(const TraceBatch& batch, const Jobs& jobs) {
+    for (const BendJob& job : jobs.bends) {
+        SourceState& source = sources_[job.source];
+        if (!source.active || source.generation != job.generation) continue;
+        bool clear = true;
+        for (std::uint32_t r = 0; r < job.rays && clear; ++r) clear = batch.closestHits[job.firstRay + r].instance == ACOUSTIC_MISS;
+        const std::uint64_t id = job.path.hash();
+        std::uint32_t slot = job.slot;
+        if (slot != kNone && source.bends[slot].id != id) slot = kNone;  // Retired since the rays left.
+        if (slot != kNone) {
+            BendSlot& kept = source.bends[slot];
+            kept.misses = clear ? 0 : kept.misses + 1;
+            kept.visible = clear || kept.misses <= config_.missTolerance;
+            continue;
+        }
+        if (!clear) continue;
+        // A new clear path takes a free slot, or the place of a weaker one.
+        std::uint32_t target = kNone;
+        float weakest = INFINITY;
+        for (std::uint32_t k = 0; k < kMaxDiffractionPaths; ++k) {
+            const BendSlot& candidate = source.bends[k];
+            if (candidate.id == id) {
+                target = kNone;
+                break;
+            }
+            const float strength = candidate.id == 0 ? -1.f : (candidate.visible ? candidate.path.amplitude[4] : 0.f);
+            if (strength < weakest) {
+                weakest = strength;
+                target = k;
+            }
+        }
+        if (target == kNone || (weakest >= 0.f && weakest >= job.path.amplitude[4])) continue;
+        BendSlot& slot2 = source.bends[target];
+        slot2 = BendSlot{};
+        slot2.id = id;
+        slot2.path = job.path;
+        slot2.visible = true;
+    }
 }
 
 }  // namespace mspatial::acoustics

@@ -34,6 +34,7 @@ The right-hand column states what this project intends and whether it has landed
 | Head tracking | The application passes listener orientation ([decode effect][sa-ambi]) | The same, and where the headphones have motion sensors the app reads them |
 | Custom ray tracing | Callback scene type ([scene][sa-scene]) | Scenes passed as plain data; ray tracing behind its own interface |
 | Occlusion | Raycast or volumetric ([simulation][sa-sim]) | Traced against live geometry |
+| Sound around obstacles | Pathing: probe-to-probe paths from baked data ([guide][sa-guide]) | Edge diffraction found from the live meshes every tick, one or two edges, with Kurze–Anderson wedge loss per band |
 
 ## Where Marathon Spatial adds features
 

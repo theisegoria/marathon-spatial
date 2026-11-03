@@ -10,7 +10,8 @@
 namespace mspatial::acoustics {
 
 inline constexpr std::uint32_t kMaxSources = 64;
-inline constexpr std::uint32_t kMaxPathsPerSource = 24;
+inline constexpr std::uint32_t kMaxPathsPerSource = 22;
+inline constexpr std::uint32_t kMaxDiffractionPaths = 2;  // With the reflections, the engine's 24 taps.
 inline constexpr std::uint32_t kMaxPortalPaths = 3;
 inline constexpr std::uint32_t kMaxRooms = 32;
 inline constexpr std::uint32_t kMaxRoomLinks = 64;
@@ -44,6 +45,9 @@ struct SourceAcoustics {
     float visibility = 1.f;     // Fraction of the source disc with a clear line to the listener.
     Bands directGain{};         // Amplitude through whatever stands in the way, 1 when clear. Distance law not included.
     ReflectionPath reflections[kMaxPathsPerSource];
+    // Sound bending around edges while the direct line is blocked, weighted by the share of the source that is hidden. order is the number of
+    // edges. Slots are as stable as the reflections'.
+    ReflectionPath diffraction[kMaxDiffractionPaths];
     PortalPath portalPaths[kMaxPortalPaths];
 };
 
