@@ -73,6 +73,12 @@ void collectRetired(ms_engine& e) {
                     e.retiringBuffers.erase(e.retiringBuffers.begin() + static_cast<std::ptrdiff_t>(i));
                     break;
                 }
+        } else if (r.kind == Retired::Kind::Crosstalk) {
+            for (std::size_t i = 0; i < e.heldCrosstalk.size(); ++i)
+                if (e.heldCrosstalk[i].get() == r.pointer) {
+                    e.heldCrosstalk.erase(e.heldCrosstalk.begin() + static_cast<std::ptrdiff_t>(i));
+                    break;
+                }
         } else {
             auto* set = static_cast<HrtfSet*>(r.pointer);
             for (std::size_t i = 0; i < e.heldSets.size(); ++i)
@@ -158,6 +164,39 @@ const char* ms_status_string(ms_status status) {
         case MS_ERR_RATE_MISMATCH: return "device and engine sample rates differ";
     }
     return "unknown";
+}
+
+void ms_crosstalk_params_default(ms_crosstalk_params* p) {
+    if (!p) return;
+    *p = ms_crosstalk_params{};
+    p->enabled = 1;
+    p->speaker_span_degrees = 15.0f;
+    p->head_radius_m = 0.0875f;
+    p->max_boost_db = 15.0f;
+    p->low_hz = 200.0f;
+    p->high_hz = 7000.0f;
+}
+
+ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* params) {
+    if (!engine) return MS_ERR_INVALID_ARGUMENT;
+    ms_engine& e = *engine;
+    if (e.speakers) return params && params->enabled ? MS_ERR_UNSUPPORTED : MS_OK;
+    // Designed before the lock: it takes a few milliseconds, and nothing it reads changes after creation.
+    std::unique_ptr<mspatial::core::CrosstalkFilter> filter;
+    if (params && params->enabled) {
+        filter = mspatial::core::designCrosstalk(*params, e.rate, e.B, e.desc.speed_of_sound);
+        if (!filter || filter->partitions > e.crosstalkPartitions) return MS_ERR_INVALID_ARGUMENT;
+    }
+    Guard guard(engine);
+    if (!filter && !e.currentCrosstalk) return MS_OK;
+    e.currentCrosstalk = filter.get();
+    if (filter) e.heldCrosstalk.push_back(std::move(filter));
+    queue(e, CommandType::SetCrosstalk, 0, 0, 0, 0, 0.0, const_cast<mspatial::core::CrosstalkFilter*>(e.currentCrosstalk));
+    return MS_OK;
+}
+
+uint32_t ms_engine_crosstalk_latency_frames(const ms_engine* engine) {
+    return engine && engine->currentCrosstalk ? engine->currentCrosstalk->latencyFrames : 0;
 }
 
 ms_status ms_speaker_layout_preset(ms_speaker_preset preset, ms_speaker_layout* layout) {
@@ -276,6 +315,11 @@ ms_status ms_engine_create(const ms_engine_desc* desc, ms_engine** engine) {
             e.speakerMix.reset(static_cast<std::size_t>(e.speakers) * B);
         }
         e.fifo.reset(static_cast<std::size_t>(std::max(e.speakers, 2u)) * B);
+        e.crosstalkPartitions = (kMaxCrosstalkTaps + B - 1) / B;
+        e.crosstalkWindow.reset(4ull * B);
+        e.crosstalkFdlRe.reset(2ull * e.crosstalkPartitions * B);
+        e.crosstalkFdlIm.reset(2ull * e.crosstalkPartitions * B);
+        e.crosstalkOut.reset(6ull * B);
         e.crossfadeRamp.reset(B);
         for (std::uint32_t t = 0; t < B; ++t) {
             const float s = std::sin(0.5f * kPi * (static_cast<float>(t) + 0.5f) / static_cast<float>(B));

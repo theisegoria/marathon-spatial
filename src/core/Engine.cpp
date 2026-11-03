@@ -302,6 +302,15 @@ void processCommands(ms_engine& e) {
                 (void)e.retired.push({Retired::Kind::Buffer, buffer, nullptr});
                 break;
             }
+            case CommandType::SetCrosstalk: {
+                if (e.retiringCrosstalk) (void)e.retired.push({Retired::Kind::Crosstalk, const_cast<CrosstalkFilter*>(e.retiringCrosstalk), nullptr});
+                e.retiringCrosstalk = e.previousCrosstalk;
+                e.previousCrosstalk = e.crosstalk;
+                e.crosstalk = static_cast<const CrosstalkFilter*>(c.pointer);
+                e.crosstalkFade = true;
+                e.crosstalkFed = true;
+                break;
+            }
             case CommandType::SetHrtf: {
                 // The old set stays alive through this block's crossfade, and goes back once the block ends.
                 if (e.retiringSet) (void)e.retired.push({Retired::Kind::Hrtf, e.retiringSet, nullptr});
@@ -1085,6 +1094,77 @@ void decodeMix(ms_engine& e) {
     }
 }
 
+// One channel of the canceller: the filter's response to that channel's history, or the channel itself when there is no filter.
+void crosstalkChannel(ms_engine& e, const CrosstalkFilter* f, std::uint32_t channel, const float* dry, float* out) {
+    const std::uint32_t B = e.B;
+    if (!f) {
+        std::memcpy(out, dry, B * sizeof(float));
+        return;
+    }
+    float* accRe = e.scratch.data() + 2ull * B;
+    float* accIm = accRe + B;
+    float* time = e.scratch.data() + 4ull * B;
+    std::memset(accRe, 0, 2ull * B * sizeof(float));
+    const std::uint32_t P = e.crosstalkPartitions;
+    for (std::uint32_t p = 0; p < f->partitions; ++p) {
+        const std::size_t at = (static_cast<std::size_t>(channel) * P + (e.crosstalkHead + P - p) % P) * B;
+        const std::size_t h = (static_cast<std::size_t>(channel) * f->partitions + p) * B;
+        cmacPacked(accRe, accIm, e.crosstalkFdlRe.data() + at, e.crosstalkFdlIm.data() + at, f->re.data() + h, f->im.data() + h, B);
+    }
+    e.opSpectrum += static_cast<std::uint64_t>(f->partitions) * B;
+    e.fft.inverse(accRe, accIm, time);
+    ++e.opInverse;
+    vDSP_vsmul(time + B, 1, &e.inverseScale, out, 1, B);
+}
+
+// Crosstalk cancellation on the stereo master, in the shuffler form: the sum and difference of the channels are filtered on their own
+// and recombined. A change of filter crosses over in one block.
+void cancelCrosstalk(ms_engine& e, float* left, float* right) {
+    if (!e.crosstalkFed) return;
+    const std::uint32_t B = e.B, P = e.crosstalkPartitions;
+    float* dry = e.crosstalkOut.data();  // [sum, difference] then [new sum, new difference] then [old sum, old difference]
+    for (std::uint32_t t = 0; t < B; ++t) {
+        dry[t] = left[t] + right[t];
+        dry[B + t] = left[t] - right[t];
+    }
+    e.crosstalkHead = (e.crosstalkHead + 1) % P;
+    for (std::uint32_t channel = 0; channel < 2; ++channel) {
+        float* window = e.crosstalkWindow.data() + static_cast<std::size_t>(channel) * 2 * B;
+        std::memcpy(window, window + B, B * sizeof(float));
+        std::memcpy(window + B, dry + static_cast<std::size_t>(channel) * B, B * sizeof(float));
+        const std::size_t at = (static_cast<std::size_t>(channel) * P + e.crosstalkHead) * B;
+        e.fft.forward(window, e.crosstalkFdlRe.data() + at, e.crosstalkFdlIm.data() + at);
+    }
+    e.opForward += 2;
+    if (!e.crosstalk && !e.crosstalkFade) return;  // Off: the master stays as it is, and the history keeps filling.
+    float* now = dry + 2ull * B;
+    float* then = dry + 4ull * B;
+    for (std::uint32_t channel = 0; channel < 2; ++channel) {
+        crosstalkChannel(e, e.crosstalk, channel, dry + static_cast<std::size_t>(channel) * B, now + static_cast<std::size_t>(channel) * B);
+        if (e.crosstalkFade) {
+            crosstalkChannel(e, e.previousCrosstalk, channel, dry + static_cast<std::size_t>(channel) * B, then + static_cast<std::size_t>(channel) * B);
+            const float* ramp = e.crossfadeRamp.data();
+            float* n = now + static_cast<std::size_t>(channel) * B;
+            const float* o = then + static_cast<std::size_t>(channel) * B;
+            for (std::uint32_t t = 0; t < B; ++t) n[t] = n[t] * ramp[t] + o[t] * (1.0f - ramp[t]);
+        }
+    }
+    for (std::uint32_t t = 0; t < B; ++t) {
+        left[t] = 0.5f * (now[t] + now[B + t]);
+        right[t] = 0.5f * (now[t] - now[B + t]);
+    }
+    e.opReal += 8ull * B;
+    if (e.crosstalkFade) {
+        e.crosstalkFade = false;
+        if (e.previousCrosstalk) {
+            if (e.retiringCrosstalk) (void)e.retired.push({Retired::Kind::Crosstalk, const_cast<CrosstalkFilter*>(e.retiringCrosstalk), nullptr});
+            e.retiringCrosstalk = e.previousCrosstalk;
+        }
+        e.previousCrosstalk = nullptr;
+    }
+    if (e.retiringCrosstalk && e.retired.push({Retired::Kind::Crosstalk, const_cast<CrosstalkFilter*>(e.retiringCrosstalk), nullptr})) e.retiringCrosstalk = nullptr;
+}
+
 void rankVoices(ms_engine& e) {
     // Keep the loudest sources in direct convolution. Stable, so the ranking is a pure function of the state.
     std::uint32_t count = 0;
@@ -1228,6 +1308,7 @@ void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
         }
         e.opReal += 3ull * F * B;
     } else {
+        cancelCrosstalk(e, master.left, master.right);
         finals[0] = master.left;
         finals[1] = master.right;
     }

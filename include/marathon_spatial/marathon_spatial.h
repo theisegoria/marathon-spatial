@@ -97,6 +97,24 @@ ms_status ms_speaker_layout_preset(ms_speaker_preset preset, ms_speaker_layout* 
    -Z forward). MS_ERR_INVALID_ARGUMENT for a layout the engine would refuse: none of it pannable, two speakers within a degree, too many. */
 ms_status ms_speaker_layout_pan(const ms_speaker_layout* layout, ms_vec3 direction, float* gains);
 
+/* Crosstalk cancellation
+ *
+ * Binaural sound on two loudspeakers. Each ear also hears the far speaker, and that crosstalk collapses the image to the line between the
+ * speakers. The canceller feeds each speaker a filtered, inverted copy of the other channel that meets the crosstalk at the far ear, so the
+ * binaural render reaches the ears nearly as on headphones and sounds can sit well outside the speakers. It works for a listener centred
+ * between the speakers, facing them; off centre it fades towards plain stereo rather than failing badly, which the band limits and the
+ * boost cap are for. Leave it off for headphones and for speaker layouts. */
+typedef struct ms_crosstalk_params {
+    uint32_t enabled;
+    float speaker_span_degrees; /* Each speaker's angle off centre as the listener sees it: a laptop about 10, monitor speakers about 15,
+                                   desktop speakers about 30. 2 to 60. */
+    float head_radius_m;        /* The spherical head of the plant. 0.05 to 0.15. Default 0.0875. */
+    float max_boost_db;         /* The most the canceller raises any frequency, 3 to 30. Lower is more robust and less coloured. Default 15. */
+    float low_hz, high_hz;      /* The band where crosstalk is cancelled; plain stereo outside it. Default 200 and 7000. */
+} ms_crosstalk_params;
+
+void ms_crosstalk_params_default(ms_crosstalk_params* params);
+
 /* Engine */
 
 typedef struct ms_engine_desc {
@@ -141,6 +159,12 @@ uint64_t ms_engine_render_interleaved(ms_engine* engine, float* stereo, uint32_t
 /* One channel per speaker of the engine's layout, in layout order. ms_engine_render on a speaker engine gives a stereo fold-down of the
    same render instead. Use one of the two per engine: a partial block left over from one is dropped by the other. Real-time safe. */
 uint64_t ms_engine_render_speakers(ms_engine* engine, float* const* channels, uint32_t frames);
+/* Crosstalk cancellation on the stereo master, for binaural sound on two speakers. Takes effect at the next commit, with a one-block
+   crossfade. It adds latency_frames of delay while on. MS_ERR_INVALID_ARGUMENT for parameters out of range, MS_ERR_UNSUPPORTED on a
+   speaker-layout engine. NULL turns it off. */
+ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* params);
+/* The delay the canceller adds while on, in frames; 0 when it is off. */
+uint32_t ms_engine_crosstalk_latency_frames(const ms_engine* engine);
 /* 2 for headphones, else the layout's speaker count. */
 uint32_t ms_engine_output_channels(const ms_engine* engine);
 

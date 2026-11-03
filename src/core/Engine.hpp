@@ -13,6 +13,7 @@
 #include "Ambisonics.hpp"
 #include "Common.hpp"
 #include "Dsp.hpp"
+#include "Crosstalk.hpp"
 #include "Fft.hpp"
 #include "Speakers.hpp"
 #include "hrtf/HrtfSet.hpp"
@@ -46,7 +47,7 @@ struct ListenerSnapshot {
 enum class CommandType : std::uint32_t {
     SourceReset, SourceBuffer, SourceCallback, SourcePlay, SourceStop, SourceSeek,
     BedReset, BedBuffer, BedCallback, BedPlay, BedStop,
-    BusProcessor, BlockCallback, BufferRetire, SetHrtf
+    BusProcessor, BlockCallback, BufferRetire, SetHrtf, SetCrosstalk
 };
 
 struct Command {
@@ -61,7 +62,7 @@ struct Command {
 };
 
 struct Retired {
-    enum class Kind : std::uint32_t { Buffer, Hrtf } kind;
+    enum class Kind : std::uint32_t { Buffer, Hrtf, Crosstalk } kind;
     void* pointer;
     void* pointer2;
 };
@@ -218,6 +219,8 @@ struct ms_engine {
     };
     std::vector<Held> heldSets;
     std::uint32_t highestSource{};
+    std::vector<std::unique_ptr<mspatial::core::CrosstalkFilter>> heldCrosstalk;  // Freed when the render side retires them.
+    const mspatial::core::CrosstalkFilter* currentCrosstalk{};
 
     // The boundary.
     mspatial::core::TripleIndex triple;
@@ -256,6 +259,14 @@ struct ms_engine {
     std::uint32_t speakers{};
     mspatial::core::SpeakerLayout layout;
     mspatial::core::Aligned<float> speakerMix;
+    // Crosstalk cancellation on the stereo master: the filter in use, the one it replaces during this block's crossfade, and the history of
+    // the sum and difference channels, which keeps running once a filter has ever been set so a later one starts with a full window.
+    const mspatial::core::CrosstalkFilter* crosstalk{};
+    const mspatial::core::CrosstalkFilter* previousCrosstalk{};
+    const mspatial::core::CrosstalkFilter* retiringCrosstalk{};
+    bool crosstalkFade{}, crosstalkFed{};
+    std::uint32_t crosstalkHead{}, crosstalkPartitions{};
+    mspatial::core::Aligned<float> crosstalkWindow, crosstalkFdlRe, crosstalkFdlIm, crosstalkOut;
     float limiterGain{1.0f};
     float airTable[2]{};   // Shelf gains in dB per metre
     std::uint64_t opForward{}, opInverse{}, opSpectrum{}, opReal{}, opUpdates{};
