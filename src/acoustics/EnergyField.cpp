@@ -156,7 +156,10 @@ std::uint32_t EnergyTracer::issue(TraceBatch& batch, std::uint32_t budget, Vec3 
     for (std::uint32_t p = 0; p < paths_.size() && issued < budget; ++p) {
         Path& path = paths_[p];
         if (path.inFlight) continue;
-        if (!path.live || path.generation != generation_) spawn(path, listener);
+        if (!path.live || path.generation != generation_) {
+            if (!spawning_) continue;
+            spawn(path, listener);
+        }
         const float reach = std::min(kMaxSegment, horizon - path.travelled);
         if (reach <= 0.f) {
             path.live = false;
@@ -236,6 +239,12 @@ void EnergyTracer::consume(const Scene& scene, const TraceBatch& batch, std::spa
             path.direction = normalize(path.direction - normal * (2.f * dot(path.direction, normal)));
         ++path.order;
     }
+}
+
+std::uint32_t EnergyTracer::livePaths() const {
+    std::uint32_t live = 0;
+    for (const Path& path : paths_) live += path.live && path.generation == generation_;
+    return live;
 }
 
 void EnergyTracer::read(EnergyField& out) const {

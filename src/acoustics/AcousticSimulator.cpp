@@ -774,21 +774,43 @@ void Simulator::publish(float dt) {
 void Simulator::prepareBends(TraceBatch& batch, Jobs& jobs) {
     const float eps = backend_.selfHitOffset();
     const std::uint32_t capacity = backend_.capacity().closestRays;
-    std::array<DiffractionPath, kMaxDiffractionPaths + 2> found;
+    std::array<DiffractionPath, 8> found;
+    const bool routes = bake_ && bake_->hasPathing();
     for (std::uint32_t s = 0; s < kMaxSources; ++s) {
         SourceState& source = sources_[s];
         if (!source.active) continue;
         // Only a blocked line needs a way around. A source in plain view keeps its slots, which fade with its hidden share.
         if (source.visibilityTarget >= 0.999f) continue;
-        const std::uint32_t count = findDiffractionPaths(scene_, source.desc.position, listener_, config_.bends,
-                                                         std::span(found).first(std::min<std::size_t>(found.size(), config_.diffractionChecksPerSource)));
-        // A kept path whose geometry is gone, or no longer among the best, goes dark; one still found takes the live geometry.
+        const auto edgeChecks = std::uint32_t(std::min<std::size_t>(found.size() / 2, config_.diffractionChecksPerSource));
+        std::uint32_t count = findDiffractionPaths(scene_, source.desc.position, listener_, config_.bends, std::span(found).first(edgeChecks));
+        // A kept edge path whose geometry is gone, or no longer among the best, goes dark; one still found takes the live geometry. A kept
+        // route through probes stands on fixed points, so it is checked again as it is, for the live source and listener.
         for (std::uint32_t k = 0; k < kMaxDiffractionPaths; ++k) {
             BendSlot& slot = source.bends[k];
             if (slot.id == 0) continue;
+            if (isProbePath(slot.path)) {
+                if (!routes) {
+                    slot.visible = false;
+                } else if (count < found.size()) {
+                    finishProbePath(slot.path, source.desc.position, listener_, config_.bends);
+                    found[count++] = slot.path;
+                }
+                continue;
+            }
             bool present = false;
             for (std::uint32_t f = 0; f < count && !present; ++f) present = found[f].hash() == slot.id;
             if (!present) slot.visible = false;
+        }
+        if (routes) {
+            std::array<DiffractionPath, 4> candidates;
+            const std::uint32_t tried = bake_->findPaths(source.desc.position, listener_, config_.bends, std::uint32_t(tick_) + s,
+                                                         std::span(candidates).first(std::min<std::size_t>(candidates.size(), config_.pathingChecksPerSource)));
+            for (std::uint32_t c = 0; c < tried && count < found.size(); ++c) {
+                const std::uint64_t id = candidates[c].hash();
+                bool known = false;
+                for (std::uint32_t f = 0; f < count && !known; ++f) known = found[f].hash() == id;
+                if (!known) found[count++] = candidates[c];
+            }
         }
         for (std::uint32_t f = 0; f < count; ++f) {
             const DiffractionPath& path = found[f];

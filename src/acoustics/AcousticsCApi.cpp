@@ -1,13 +1,17 @@
 #include "marathon_spatial/marathon_spatial_acoustics.h"
 
 #include "acoustics/AcousticSimulator.hpp"
+#include "acoustics/Bake.hpp"
 #include "acoustics/Convolver.hpp"
 #include "acoustics/LateReverb.hpp"
 #include "acoustics/MetalTraceBackend.hpp"
 #include "acoustics/ReverbIr.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <fstream>
+#include <functional>
 #include <memory>
 #include <numbers>
 
@@ -33,6 +37,10 @@ struct HybridParams {
 
 }  // namespace
 
+struct ms_acoustic_bake {
+    std::shared_ptr<const AcousticBake> bake;
+};
+
 struct ms_acoustics {
     Scene scene;
     std::unique_ptr<TraceBackend> backend;
@@ -44,8 +52,12 @@ struct ms_acoustics {
     bool reverbReady = false;
 
     // Control thread.
+    Bands air = airAttenuation();
+    std::shared_ptr<const AcousticBake> bake;
+    double bakedPrior = 4096.0;
+    bool bakedInField = false;
     ReverbIrSynth synth;
-    EnergyField field;
+    EnergyField field, live, baked;
     std::vector<float> irStore;
     float sinceResponse = 0.f;
     bool responseActive = false;
@@ -116,6 +128,7 @@ void ms_acoustics_config_default(ms_acoustics_config* config) {
     config->humidity_percent = 50.f;
     config->convolution_seconds = 1.5f;
     config->energy_paths = 384;
+    config->baked_prior_paths = 4096.f;
 }
 
 ms_acoustics* ms_acoustics_create(const ms_acoustics_config* config) {
@@ -135,13 +148,12 @@ ms_acoustics* ms_acoustics_create(const ms_acoustics_config* config) {
     SimulatorConfig simulation;
     simulation.air = airAttenuation(config->temperature_celsius, config->humidity_percent);
     simulation.formula = config->use_sabine ? DecayFormula::Sabine : DecayFormula::Eyring;
+    a->air = simulation.air;
+    a->bakedPrior = std::max(0.f, config->baked_prior_paths);
     a->convolutionSeconds = std::clamp(config->convolution_seconds, 0.f, 4.f);
-    if (a->convolutionSeconds > 0.f && config->energy_paths > 0) {
-        simulation.energy.paths = config->energy_paths;
-        simulation.energy.seconds = a->convolutionSeconds;
-    } else {
-        a->convolutionSeconds = 0.f;
-    }
+    // With no live paths the convolution still runs from a bake's field, once one is set.
+    simulation.energy.paths = a->convolutionSeconds > 0.f ? config->energy_paths : 0;
+    simulation.energy.seconds = std::max(a->convolutionSeconds, 0.01f);
     a->simulator = std::make_unique<Simulator>(a->scene, *a->backend, simulation);
     return a.release();
 }
@@ -196,7 +208,24 @@ namespace {
 // A new response from the listener's field, or silence when there is not enough of it. Control thread.
 void buildResponse(ms_acoustics* a) {
     const AcousticSnapshot* snapshot = a->simulator->lastPublished();
-    a->simulator->energyTracer().read(a->field);
+    const EnergyTracer& tracer = a->simulator->energyTracer();
+    tracer.read(a->live);
+    // A bake's probes in the listener's room give the field a converged start, worth bakedPrior paths, which the live paths then refine.
+    const float binSeconds = tracer.config().binSeconds;
+    const auto bins = std::uint32_t(std::ceil(a->convolutionSeconds / binSeconds));
+    const std::uint32_t listenerRoom = snapshot ? snapshot->listenerRoom : kNone;
+    a->bakedInField = a->bake && a->bake->hasReverb() && listenerRoom != kNone && a->bakedPrior > 0.0 &&
+                      a->bake->fieldAt(a->simulator->listener(), listenerRoom, bins, binSeconds, a->baked);
+    if (a->bakedInField) {
+        if (a->live.room == listenerRoom && a->live.bins == bins && a->live.paths > 0.0) {
+            blendFields(a->live, a->baked, a->bakedPrior, a->field);
+        } else {
+            a->field = a->baked;
+            a->field.paths = a->bakedPrior;
+        }
+    } else {
+        a->field = a->live;
+    }
     const std::uint32_t room = a->field.room;
     const bool usable = snapshot && room != kNone && room < snapshot->roomCount && snapshot->rooms[room].active && a->field.paths >= kMinimumPaths;
     if (!usable) {
@@ -258,7 +287,11 @@ void ms_acoustics_energy_view_get(const ms_acoustics* a, ms_acoustic_energy_view
     *out = {};
     out->room = MS_ACOUSTIC_NONE;
     EnergyField field;
-    a->simulator->energyTracer().read(field);
+    if (a->bakedInField)
+        field = a->field;
+    else
+        a->simulator->energyTracer().read(field);
+    out->baked = a->bakedInField;
     out->active = a->responseActive;
     out->room = a->responseActive ? a->params.room : field.room;
     out->paths = float(field.paths);
@@ -441,6 +474,90 @@ void ms_acoustics_reverb_process_ambisonic(ms_acoustics* a, const float* const* 
                                            float* const* ambisonic, uint32_t frames) {
     static float* const none[kAmbisonicChannels] = {};
     processHybrid(a, inputs, left, right, ambisonic ? ambisonic : none, frames);
+}
+
+void ms_acoustic_bake_config_default(ms_acoustic_bake_config* config) {
+    *config = {};
+    config->probe_spacing = 2.f;
+    config->clearance = 0.3f;
+    config->reverb = 1;
+    config->pathing = 1;
+    config->paths_per_probe = 4096;
+    config->threads = 4;
+}
+
+ms_acoustic_bake* ms_acoustics_bake(const ms_acoustics* a, const ms_acoustic_bake_config* config, void (*progress)(float, void*), void* user,
+                                    ms_status* status) {
+    ms_acoustic_bake_config defaults;
+    ms_acoustic_bake_config_default(&defaults);
+    if (!config) config = &defaults;
+    const auto report = [&](ms_status s) {
+        if (status) *status = s;
+    };
+    if (!a || (config->probe_count > 0 && !config->probes)) {
+        report(MS_ERR_INVALID_ARGUMENT);
+        return nullptr;
+    }
+    BakeConfig bake;
+    bake.spacing = config->probe_spacing;
+    bake.clearance = config->clearance;
+    for (uint32_t i = 0; i < config->probe_count; ++i) bake.probes.push_back(toVec3(config->probes[i]));
+    bake.reverb = config->reverb != 0;
+    bake.pathing = config->pathing != 0;
+    bake.pathsPerProbe = config->paths_per_probe;
+    bake.threads = config->threads;
+    bake.energy.seconds = a->convolutionSeconds > 0.f ? a->convolutionSeconds : 1.5f;
+    bake.energy.air = a->air;
+    auto out = std::make_unique<ms_acoustic_bake>();
+    auto result = std::make_shared<AcousticBake>();
+    std::function<void(float)> callback;
+    if (progress) callback = [&](float done) { progress(done, user); };
+    if (!bakeScene(a->scene, bake, *result, nullptr, callback)) {
+        report(bake.probes.size() > kMaxBakeProbes ? MS_ERR_LIMIT_REACHED : MS_ERR_INVALID_ARGUMENT);
+        return nullptr;
+    }
+    out->bake = std::move(result);
+    report(MS_OK);
+    return out.release();
+}
+
+ms_status ms_acoustic_bake_save(const ms_acoustic_bake* bake, const char* path) {
+    if (!bake || !path) return MS_ERR_INVALID_ARGUMENT;
+    return bake->bake->save(path) ? MS_OK : MS_ERR_NOT_FOUND;
+}
+
+ms_acoustic_bake* ms_acoustic_bake_load(const char* path, ms_status* status) {
+    const auto report = [&](ms_status s) {
+        if (status) *status = s;
+    };
+    if (!path) {
+        report(MS_ERR_INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!std::ifstream(path, std::ios::binary)) {
+        report(MS_ERR_NOT_FOUND);
+        return nullptr;
+    }
+    auto result = std::make_shared<AcousticBake>();
+    if (!AcousticBake::load(path, *result)) {
+        report(MS_ERR_BAD_FILE);
+        return nullptr;
+    }
+    auto out = std::make_unique<ms_acoustic_bake>();
+    out->bake = std::move(result);
+    report(MS_OK);
+    return out.release();
+}
+
+void ms_acoustic_bake_destroy(ms_acoustic_bake* bake) { delete bake; }
+uint32_t ms_acoustic_bake_probe_count(const ms_acoustic_bake* bake) { return bake ? bake->bake->probeCount() : 0; }
+uint32_t ms_acoustic_bake_matches(const ms_acoustic_bake* bake, const ms_acoustics* a) {
+    return bake && a && bake->bake->sceneHash == staticSceneHash(a->scene);
+}
+
+void ms_acoustics_set_bake(ms_acoustics* a, const ms_acoustic_bake* bake) {
+    a->bake = bake ? bake->bake : nullptr;
+    a->simulator->setBake(a->bake);
 }
 
 }  // extern "C"

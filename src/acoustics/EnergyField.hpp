@@ -79,6 +79,11 @@ public:
     // Fades old evidence by dt seconds.
     void age(float dt);
     void reset();
+    // With spawning off, a path that ends is not replaced, so the paths in flight run out: an offline bake drains them so that every path
+    // it counts has reached the end of the field.
+    void setSpawning(bool spawning) { spawning_ = spawning; }
+    std::uint32_t livePaths() const;
+    double emitted() const { return emitted_; }
 
     // The current estimate.
     void read(EnergyField& out) const;
@@ -109,6 +114,7 @@ private:
     std::uint32_t sequence_ = 0;
     std::uint32_t rng_ = 0x9e3779b9u;
     std::uint64_t segments_ = 0;
+    bool spawning_ = true;
 };
 
 }  // namespace mspatial::acoustics

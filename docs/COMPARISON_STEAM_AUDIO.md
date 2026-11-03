@@ -18,7 +18,6 @@ The right-hand column states what this project intends and whether it has landed
 |---|---|---|
 | Platforms | Windows, Linux, macOS, Android, iOS ([README][sa-repo]) | macOS 27 or later on Apple M3 or later, only |
 | Engines and middleware | Unity, Unreal Engine, FMOD Studio, Wwise ([README][sa-repo]) | None. A C API and Swift, so you write the integration |
-| Precomputed propagation | Baked reflections and pathing on probes ([guide][sa-guide]) | Not planned for the first release |
 | Maturity | Public since 2017, with a long release history ([releases][sa-releases]) | Pre-release |
 | Speaker layouts | Mono to 7.1 and custom layouts ([`phonon.h`][sa-header]) | Stereo. Headphones are the focus |
 
@@ -34,6 +33,7 @@ The right-hand column states what this project intends and whether it has landed
 | Head tracking | The application passes listener orientation ([decode effect][sa-ambi]) | The same, and where the headphones have motion sensors the app reads them |
 | Custom ray tracing | Callback scene type ([scene][sa-scene]) | Scenes passed as plain data; ray tracing behind its own interface |
 | Occlusion | Raycast or volumetric ([simulation][sa-sim]) | Traced against live geometry |
+| Precomputed propagation | Baked reflections and pathing on probes ([guide][sa-guide]) | Baked probes: an energy field per probe that seeds the live convolution reverb, and shortest routes between probes for sound round corners, checked by live rays |
 | Sound around obstacles | Pathing: probe-to-probe paths from baked data ([guide][sa-guide]) | Edge diffraction found from the live meshes every tick, one or two edges, with Kurze–Anderson wedge loss per band |
 
 ## Where Marathon Spatial adds features

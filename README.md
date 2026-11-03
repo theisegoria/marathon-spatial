@@ -16,6 +16,8 @@ Spatial Studio, a native macOS 27 app.
 - Near-field, ISO 9613-1 air absorption, Doppler, directivity and per-source filters
 - Early reflections traced from live geometry, so moving doors and destruction change the sound
 - Diffraction around the edges of live geometry: over a wall's top or round both corners of a pillar, with per-band wedge loss
+- Baked probes for static scenes: a converged reverb field the moment a listener arrives, refined by the live field, and routes
+  round any number of corners, still checked by live rays
 - Hybrid late reverb in the listener's room: an energy field traced from the listener becomes a first-order ambisonic impulse
   response for convolution, and a feedback network carries the tail on at the level the field reached
 - Late reverb per room, driven by real room volume and absorption, coupled through portals
@@ -125,6 +127,7 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Late reverb, room acoustics and portals | In the tree, with CPU tests |
 | Convolution reverb from the traced energy field, hybrid with the feedback network | In the tree, with CPU tests; on by default in Studio |
 | Edge diffraction, one or two edges, validated by rays | In the tree, with CPU tests; on by default |
+| Baked probes: reverb fields and routes, saved as versioned files | In the tree, with CPU tests; through the C API |
 | HRTF sets: analytic sphere, SOFA import, `.mshrtf` packs | In the tree, with CPU tests |
 | Source, voice and bed rendering, the engine | In the tree, with CPU tests |
 | Live Core Audio output | In the tree. Run on a Mac and listened to through Studio |

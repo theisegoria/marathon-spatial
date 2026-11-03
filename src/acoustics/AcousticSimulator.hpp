@@ -12,11 +12,13 @@
 
 #include "acoustics/AcousticSnapshot.hpp"
 #include "acoustics/AcousticTrace.hpp"
+#include "acoustics/Bake.hpp"
 #include "acoustics/Diffraction.hpp"
 #include "acoustics/EnergyField.hpp"
 #include "acoustics/RoomAcoustics.hpp"
 
 #include <array>
+#include <memory>
 #include <unordered_map>
 
 namespace mspatial::acoustics {
@@ -72,6 +74,8 @@ struct SimulatorConfig {
     bool diffraction = true;
     std::uint32_t diffractionChecksPerSource = 3;
     DiffractionConfig bends{};
+    // Routes through a baked probe graph, when a bake is set: new candidates tried per blocked source each tick.
+    std::uint32_t pathingChecksPerSource = 2;
 };
 
 class Simulator {
@@ -83,6 +87,10 @@ public:
     void setSource(std::uint32_t id, const SourceDesc& desc);
     void removeSource(std::uint32_t id);
     void setListener(Vec3 position) { listener_ = position; }
+    Vec3 listener() const { return listener_; }
+    // Routes round obstacles through this bake's probes, alongside edge diffraction. nullptr stops using one.
+    void setBake(std::shared_ptr<const AcousticBake> bake) { bake_ = std::move(bake); }
+    const AcousticBake* bake() const { return bake_.get(); }
 
     // One tick: takes finished ray results, refreshes everything analytic, publishes a snapshot, and queues the next rays.
     void tick(float dt);
@@ -204,6 +212,7 @@ private:
     std::vector<std::uint32_t> portalPrevious_;
     std::vector<std::uint8_t> portalDone_;
     EnergyTracer energy_;
+    std::shared_ptr<const AcousticBake> bake_;
     SnapshotExchange<AcousticSnapshot> exchange_;
     const AcousticSnapshot* published_ = nullptr;
 };

@@ -38,7 +38,8 @@ typedef struct ms_acoustics_config {
     float humidity_percent;
     uint32_t use_sabine;        /* Nonzero uses Sabine decay, zero Eyring. */
     float convolution_seconds;  /* Length of the listener room's convolution reverb. 0 turns it off. Default 1.5. */
-    uint32_t energy_paths;      /* Paths tracing the listener's energy field, one segment each per tick. Default 384. */
+    uint32_t energy_paths;      /* Paths tracing the listener's energy field, one segment each per tick. Default 384. 0 leaves only a bake's field. */
+    float baked_prior_paths;    /* How many traced paths a bake's field counts as when the live field refines it. Default 4096. */
 } ms_acoustics_config;
 
 /* Energy fractions per octave band, 62.5 Hz to 8 kHz. */
@@ -102,7 +103,42 @@ typedef struct ms_acoustic_energy_view {
     float seconds;                     /* Length of the convolution part. */
     float t60[MS_ACOUSTIC_BANDS];      /* Fitted to the traced field; 0 where it holds too little to fit. */
     float energy[MS_ACOUSTIC_BANDS];   /* Reflected energy of an impulse in the field, relative to the direct sound at 1 m. */
+    uint32_t baked;                    /* The field includes a bake's probes. paths then counts them at baked_prior_paths. */
 } ms_acoustic_energy_view;
+
+/*
+ * Baked propagation for the static part of a scene. A bake places probes through the rooms and stores, for each, the energy field a listener
+ * there would measure, and for every pair of probes that see each other, the shortest route between them. Set on an ms_acoustics, it gives the
+ * listener's room a converged reverb the moment the listener arrives, which the live field then refines, and routes sound round any number of
+ * corners where edge diffraction stops at two. Rays still check every route against the live scene, so a door closed since the bake blocks it.
+ */
+typedef struct ms_acoustic_bake ms_acoustic_bake;
+
+typedef struct ms_acoustic_bake_config {
+    float probe_spacing;         /* Metres between grid probes. Default 2. */
+    float clearance;             /* Grid probes closer than this to a surface are dropped. Default 0.3. */
+    const ms_vec3* probes;       /* Your own probe positions instead of a grid, or NULL. */
+    uint32_t probe_count;
+    uint32_t reverb;             /* Bake each probe's energy field. Default 1. */
+    uint32_t pathing;            /* Bake routes between probes. Default 1. */
+    uint32_t paths_per_probe;    /* Energy paths traced from each probe. Default 4096. */
+    uint32_t threads;            /* Default 4. */
+} ms_acoustic_bake_config;
+
+void ms_acoustic_bake_config_default(ms_acoustic_bake_config* config);
+/* Bakes the scene as it stands, with the field length and air of this ms_acoustics. Slow: seconds to minutes. Call on the control thread;
+   progress, when not NULL, is called on it with the share done, 0 to 1. Returns NULL on failure, with the reason in status. */
+ms_acoustic_bake* ms_acoustics_bake(const ms_acoustics* acoustics, const ms_acoustic_bake_config* config, void (*progress)(float done, void* user),
+                                    void* user, ms_status* status);
+ms_status ms_acoustic_bake_save(const ms_acoustic_bake* bake, const char* path);
+/* MS_ERR_NOT_FOUND when the file cannot be opened, MS_ERR_BAD_FILE when it is not a whole bake of this version. */
+ms_acoustic_bake* ms_acoustic_bake_load(const char* path, ms_status* status);
+void ms_acoustic_bake_destroy(ms_acoustic_bake* bake);
+uint32_t ms_acoustic_bake_probe_count(const ms_acoustic_bake* bake);
+/* Nonzero when the scene's enabled geometry, transforms and materials are what the bake was made from. */
+uint32_t ms_acoustic_bake_matches(const ms_acoustic_bake* bake, const ms_acoustics* acoustics);
+/* Uses the bake from now on, or none with NULL. It keeps its own reference, so the bake may be destroyed at once. */
+void ms_acoustics_set_bake(ms_acoustics* acoustics, const ms_acoustic_bake* bake);
 
 void ms_acoustics_config_default(ms_acoustics_config* config);
 ms_acoustics* ms_acoustics_create(const ms_acoustics_config* config);

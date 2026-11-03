@@ -6,6 +6,7 @@ get_filename_component(MARATHON_SPATIAL_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSO
 
 add_library(marathon_spatial_acoustics STATIC
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticScene.cpp
+    ${MARATHON_SPATIAL_ROOT}/src/acoustics/Bake.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticSimulator.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/AcousticsCApi.cpp
     ${MARATHON_SPATIAL_ROOT}/src/acoustics/Convolver.cpp

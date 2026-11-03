@@ -1,5 +1,6 @@
 // CPU-only acoustics tests against analytic rooms. Everything renders to memory; nothing here touches an audio device or the GPU.
 #include "acoustics/AcousticSimulator.hpp"
+#include "acoustics/Bake.hpp"
 #include "acoustics/Convolver.hpp"
 #include "acoustics/Diffraction.hpp"
 #include "acoustics/EnergyField.hpp"
@@ -12,6 +13,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <new>
 #include <numbers>
 #include <random>
@@ -1410,6 +1413,249 @@ void capiHybridReverb() {
 }
 }  // namespace
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Baked propagation.
+
+// A corridor that doubles back: thick walls from either side leave a gap at alternate ends, so the way from one end to the other turns four
+// corners, more than edge diffraction follows.
+struct Serpentine {
+    Scene scene;
+    std::uint32_t room = kNone;
+    Serpentine() {
+        const std::uint32_t wall = scene.addMaterial(flat(0.3f));
+        scene.addInstance(boxInside(vec3(-6, 0, -6), vec3(6, 4, 6), {wall, wall, wall, wall, wall, wall}).add(scene), Transform{});
+        scene.addInstance(boxInside(vec3(-6, 0, -2.2f), vec3(3, 4, -1.8f), {wall, wall, wall, wall, wall, wall}).add(scene), Transform{});
+        scene.addInstance(boxInside(vec3(-3, 0, 1.8f), vec3(6, 4, 2.2f), {wall, wall, wall, wall, wall, wall}).add(scene), Transform{});
+        RoomDesc desc;
+        desc.bounds = {Box{vec3(-6, 0, -6), vec3(6, 4, 6)}};
+        desc.probe = vec3(0, 2, -4);
+        room = scene.addRoom(desc);
+    }
+};
+
+void bakedRoutesRoundACorridor() {
+    Serpentine s;
+    BakeConfig config;
+    config.spacing = 1.f;
+    config.reverb = false;
+    auto bake = std::make_shared<AcousticBake>();
+    std::string error;
+    float last = -1.f;
+    bool monotonic = true;
+    const bool ok = bakeScene(s.scene, config, *bake, &error, [&](float done) {
+        monotonic = monotonic && done >= last;
+        last = done;
+    });
+    check(ok, "the corridor bakes");
+    check(monotonic && last == 1.f, "bake progress rises to 1");
+    check(bake->probeCount() > 400 && bake->hasPathing() && !bake->hasReverb(), "probes fill the corridor");
+    std::printf("  ok %u probes, %u dropped, %llu visible pairs\n", bake->probeCount(), bake->stats.droppedProbes,
+                (unsigned long long)bake->stats.visiblePairs);
+
+    const Vec3 source = vec3(0, 1.5f, -5), listener = vec3(0, 1.5f, 5);
+    DiffractionConfig bends;
+    bends.air = noAir();
+    std::array<DiffractionPath, 4> edgePaths;
+    check(findDiffractionPaths(s.scene, source, listener, bends, edgePaths) == 0 ||
+              std::all_of(edgePaths.begin(), edgePaths.end(), [](const DiffractionPath& p) { return p.order <= 2; }),
+          "edge diffraction alone has at most two edges");
+
+    // Round the corners: 2 sqrt(9 + 7.84) + 0.8 + sqrt(36 + 12.96) metres pulled tight on the walls' corners.
+    const double shortest = 2 * std::sqrt(9 + 7.84) + 0.8 + std::sqrt(36 + 12.96);
+    auto backend = makeCpuTraceBackend();
+    SimulatorConfig simulation;
+    simulation.air = noAir();
+    simulation.bends.air = noAir();
+    Simulator plain(s.scene, *backend, simulation);
+    plain.setListener(listener);
+    const std::uint32_t id = plain.addSource({source, 0.1f});
+    for (int i = 0; i < 40; ++i) plain.tick(1.f / 60.f);
+    double without = 0;
+    for (const ReflectionPath& path : plain.snapshots().read().sources[id].diffraction) without = std::max(without, double(path.gain[4]));
+    near(without, 0.0, 1e-6, "without a bake nothing finds the way round");
+
+    auto backend2 = makeCpuTraceBackend();
+    Simulator baked(s.scene, *backend2, simulation);
+    baked.setBake(bake);
+    baked.setListener(listener);
+    const std::uint32_t id2 = baked.addSource({source, 0.1f});
+    for (int i = 0; i < 60; ++i) baked.tick(1.f / 60.f);
+    const SourceAcoustics& view = baked.snapshots().read().sources[id2];
+    near(view.visibility, 0.0, 1e-3, "the walls hide the source");
+    const ReflectionPath* best = nullptr;
+    for (const ReflectionPath& path : view.diffraction)
+        if (path.id != 0 && (!best || path.gain[4] > best->gain[4])) best = &path;
+    check(best != nullptr && best->gain[4] > 0.f, "a baked route carries sound round the corridor");
+    if (!best) return;
+    const double length = best->delaySeconds * kDefaultSpeedOfSound;
+    check(best->order >= 3, "the route turns more corners than edge diffraction follows");
+    check(length >= shortest - 1e-3 && length <= 1.2 * shortest, "the route is within 20% of the tightest way round");
+    std::printf("  ok route of %.2f m round %u bends, tightest %.2f m, %.1f dB at 1 kHz\n", length, best->order, shortest,
+                20 * std::log10(best->gain[4]));
+    const double routeLoss = 5 + 20 * std::log10(std::sqrt(2 * std::numbers::pi * 2 * (length - 10) * 1000 / 343) /
+                                                  std::tanh(std::sqrt(2 * std::numbers::pi * 2 * (length - 10) * 1000 / 343)));
+    near(20 * std::log10(best->gain[4] * length), -routeLoss, 0.5, "route loss at 1 kHz: one wedge for the whole detour, dB");
+    // The route arrives from the side of the corridor it last came through: the gap at the listener's left, -x.
+    check(best->arrival.x < 0.f, "the route arrives through the last gap");
+
+    // The source steps into view: the route fades.
+    baked.setSource(id2, {vec3(0, 1.5f, 4), 0.1f});
+    for (int i = 0; i < 60; ++i) baked.tick(1.f / 60.f);
+    double left = 0;
+    for (const ReflectionPath& path : baked.snapshots().read().sources[id2].diffraction) left = std::max(left, double(path.gain[4]));
+    near(left, 0.0, 1e-4, "the route fades once the line is clear");
+}
+
+void bakeDropsProbesInsideSolids() {
+    PillarRoom room;
+    BakeConfig config;
+    config.spacing = 0.75f;
+    config.clearance = 0.2f;
+    config.reverb = false;
+    AcousticBake bake;
+    check(bakeScene(room.scene, config, bake), "the pillar room bakes");
+    std::uint32_t inside = 0;
+    for (Vec3 p : bake.positions) inside += std::fabs(p.x) < 1.f && std::fabs(p.z) < 1.f;
+    near(inside, 0.0, 0.0, "no probe is left inside the pillar");
+    check(bake.stats.droppedProbes > 0, "the grid points inside it were dropped");
+}
+
+void bakedFieldMatchesTheRoom() {
+    TracedBox box(1.2f, 0);
+    BakeConfig config;
+    config.spacing = 4.f;
+    config.pathing = false;
+    config.pathsPerProbe = 1536;
+    config.energy.seconds = 1.2f;
+    config.energy.air = noAir();
+    AcousticBake bake;
+    check(bakeScene(box.scene, config, bake), "the box bakes");
+    check(bake.hasReverb() && !bake.hasPathing() && bake.probeCount() >= 6, "every probe has a field");
+    EnergyField field;
+    check(bake.fieldAt(vec3(3.7f, 4.6f, 1.7f), box.room, 120, 0.01f, field), "a field at the listener");
+    check(!bake.fieldAt(vec3(3.7f, 4.6f, 1.7f), box.room + 1, 120, 0.01f, field) || false, "no field for a room without probes");
+    bake.fieldAt(vec3(3.7f, 4.6f, 1.7f), box.room, 120, 0.01f, field);
+    const double V = 320, S = 304, alpha = 0.2, c = 343;
+    const double eyring = 24.0 * std::log(10.0) * V / (c * -S * std::log(1.0 - alpha));
+    near(field.t60()[4], eyring, eyring * 0.15, "baked T60 at 1 kHz against Eyring");
+    double total = 0;
+    for (std::uint32_t i = 0; i < field.bins; ++i) total += field.band(4, i);
+    const double A = -S * std::log(1.0 - alpha);
+    const double expected = 16 * std::numbers::pi * (1 - alpha) / A * (1.0 - std::exp(-c * A / (4 * V) * 1.2));
+    near(10 * std::log10(total / expected), 0.0, 2.0, "baked reflected energy against 16 pi (1 - alpha) / A, dB");
+    // Half-width bins hold the same energy in all.
+    EnergyField fine;
+    bake.fieldAt(vec3(3.7f, 4.6f, 1.7f), box.room, 240, 0.005f, fine);
+    double fineTotal = 0;
+    for (std::uint32_t i = 0; i < fine.bins; ++i) fineTotal += fine.band(4, i);
+    near(fineTotal / total, 1.0, 1e-4, "rebinning keeps the energy");
+
+    // To disk and back, bit for bit; a cut-short file is refused.
+    const std::string file = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/ms_bake_test.msbake";
+    check(bake.save(file), "the bake saves");
+    AcousticBake loaded;
+    std::string error;
+    check(AcousticBake::load(file, loaded, &error), "the bake loads");
+    check(loaded.totals == bake.totals && loaded.shares == bake.shares && loaded.rooms == bake.rooms && loaded.sceneHash == bake.sceneHash,
+          "what loads is what was saved");
+    {
+        std::ifstream in(file, std::ios::binary);
+        std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::ofstream outFile(file, std::ios::binary | std::ios::trunc);
+        outFile.write(bytes.data(), std::streamsize(bytes.size() - 7));
+    }
+    check(!AcousticBake::load(file, loaded, &error), "a cut-short bake is refused");
+    std::remove(file.c_str());
+
+    // The scene hash follows what rays see.
+    const std::uint64_t before = staticSceneHash(box.scene);
+    check(before == bake.sceneHash, "the bake carries its scene's hash");
+    box.scene.setMaterial(0, flat(0.4f, 0.5f));
+    check(staticSceneHash(box.scene) != before, "a changed material changes the hash");
+
+    // Blending: the baked field counts as prior paths, the live one as its own.
+    EnergyField live = field, blended;
+    std::fill(live.energy.begin(), live.energy.end(), 0.f);
+    live.paths = 1000;
+    blendFields(live, field, 3000, blended);
+    near(blended.energy[50] / field.energy[50], 0.75, 1e-5, "a prior of 3000 paths against 1000 live ones keeps three quarters");
+    near(blended.paths, 4000, 0, "the blend holds both");
+}
+
+void capiBakedReverb() {
+    ms_acoustics_config config;
+    ms_acoustics_config_default(&config);
+    config.convolution_seconds = 1.f;
+    config.energy_paths = 0;  // Nothing traced live: the response can only come from the bake.
+    ms_acoustics* acoustics = ms_acoustics_create(&config);
+    ms_acoustic_material material{};
+    for (std::size_t b = 0; b < kBandCount; ++b) {
+        material.absorption[b] = 0.2f;
+        material.scattering[b] = 0.5f;
+    }
+    const std::uint32_t wall = ms_acoustics_material_add(acoustics, &material);
+    const MeshData mesh = boxInside(vec3(0, 0, 0), vec3(10, 8, 4), {wall, wall, wall, wall, wall, wall});
+    const std::uint32_t meshId = ms_acoustics_mesh_add(acoustics, mesh.positions.data(), std::uint32_t(mesh.positions.size() / 3), mesh.indices.data(),
+                                                       std::uint32_t(mesh.indices.size()), mesh.materials.data());
+    ms_acoustics_instance_add(acoustics, meshId, nullptr);
+    const ms_acoustic_box bounds{{0, 0, 0}, {10, 8, 4}};
+    ms_acoustic_room room{};
+    room.bounds = &bounds;
+    room.bound_count = 1;
+    room.probe = {5, 4, 2};
+    const std::uint32_t roomId = ms_acoustics_room_add(acoustics, &room);
+    ms_acoustics_set_listener(acoustics, {3.7f, 4.6f, 1.7f});
+    for (int i = 0; i < 60; ++i) ms_acoustics_tick(acoustics, 1.f / 60.f);
+    check(ms_acoustics_reverb_prepare(acoustics) == MS_OK, "reverb prepares with no live paths");
+
+    ms_acoustic_bake_config bakeConfig;
+    ms_acoustic_bake_config_default(&bakeConfig);
+    bakeConfig.probe_spacing = 4.f;
+    bakeConfig.paths_per_probe = 1024;
+    ms_status status = MS_ERR_DEVICE;
+    std::uint32_t calls = 0;
+    ms_acoustic_bake* bake = ms_acoustics_bake(
+        acoustics, &bakeConfig, [](float, void* user) { ++*static_cast<std::uint32_t*>(user); }, &calls, &status);
+    check(bake && status == MS_OK && calls > 0, "the C API bakes, reporting progress");
+    check(ms_acoustic_bake_matches(bake, acoustics), "the bake matches its scene");
+    const std::string file = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/ms_capi_bake.msbake";
+    check(ms_acoustic_bake_save(bake, file.c_str()) == MS_OK, "the C API saves a bake");
+    const std::uint32_t probes = ms_acoustic_bake_probe_count(bake);
+    ms_acoustic_bake_destroy(bake);
+    ms_acoustic_bake* loaded = ms_acoustic_bake_load(file.c_str(), &status);
+    check(loaded && status == MS_OK && ms_acoustic_bake_probe_count(loaded) == probes, "and loads it back");
+    check(!ms_acoustic_bake_load((file + ".missing").c_str(), &status) && status == MS_ERR_NOT_FOUND, "a missing bake is not found");
+    std::remove(file.c_str());
+
+    ms_acoustic_energy_view view;
+    for (int i = 0; i < 60; ++i) ms_acoustics_tick(acoustics, 1.f / 60.f);
+    ms_acoustics_energy_view_get(acoustics, &view);
+    check(!view.active, "no live paths and no bake: no convolution response");
+    ms_acoustics_set_bake(acoustics, loaded);
+    ms_acoustic_bake_destroy(loaded);  // The ms_acoustics keeps its own reference.
+    std::vector<float> silence(800, 0.f), sink(800);
+    for (int i = 0; i < 60; ++i) {
+        ms_acoustics_tick(acoustics, 1.f / 60.f);
+        const float* quiet[] = {silence.data()};
+        float* out[] = {sink.data()};
+        ms_acoustics_reverb_process(acoustics, quiet, out, out, 800);
+    }
+    ms_acoustics_energy_view_get(acoustics, &view);
+    check(view.active && view.baked && view.room == roomId, "the bake gives the room a response at once");
+    const double eyring = 24.0 * std::log(10.0) * 320 / (343 * -304 * std::log(0.8));
+    near(view.t60[4], eyring, eyring * 0.2, "baked response T60 at 1 kHz");
+    ms_acoustics_set_bake(acoustics, nullptr);
+    for (int i = 0; i < 60; ++i) {
+        ms_acoustics_tick(acoustics, 1.f / 60.f);
+        const float* quiet[] = {silence.data()};
+        float* out[] = {sink.data()};
+        ms_acoustics_reverb_process(acoustics, quiet, out, out, 800);
+    }
+    ms_acoustics_energy_view_get(acoustics, &view);
+    check(!view.active && !view.baked, "taking the bake away ends the response");
+    ms_acoustics_destroy(acoustics);
+}
+
 void* operator new(std::size_t size) {
     allocationCount.fetch_add(1, std::memory_order_relaxed);
     if (void* p = std::malloc(size)) return p;
@@ -1449,6 +1695,10 @@ int main() {
     responseMatchesItsField();
     hybridDelaysAndScalesTheSend();
     capiHybridReverb();
+    bakedRoutesRoundACorridor();
+    bakeDropsProbesInsideSolids();
+    bakedFieldMatchesTheRoom();
+    capiBakedReverb();
     measuredCost();
     std::printf(failures ? "\n%d FAILED\n" : "\nall passed\n", failures);
     return failures ? 1 : 0;

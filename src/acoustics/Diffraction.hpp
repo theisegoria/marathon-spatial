@@ -19,6 +19,8 @@
 namespace mspatial::acoustics {
 
 inline constexpr std::uint32_t kMaxDiffractionOrder = 2;
+// Bends a path may hold: edge paths use at most kMaxDiffractionOrder, routes through baked probes up to this many.
+inline constexpr std::uint32_t kMaxBendPoints = 4;
 
 // Fills mesh.edges and mesh.edgeBvh from the mesh's triangles. Vertices closer than a millimetre are one vertex, so a mesh whose faces
 // carry their own copies of shared corners still has its edges.
@@ -32,9 +34,9 @@ struct EdgeRef {
 
 struct DiffractionPath {
     std::uint32_t order = 0;
-    std::array<EdgeRef, kMaxDiffractionOrder> edges{};
-    std::array<Vec3, kMaxDiffractionOrder> points{};  // Where the path bends, on the edges.
-    std::array<Vec3, kMaxDiffractionOrder> clear{};   // The same points moved 2 cm off the wedge, where validation rays turn.
+    std::array<EdgeRef, kMaxBendPoints> edges{};
+    std::array<Vec3, kMaxBendPoints> points{};  // Where the path bends, on the edges.
+    std::array<Vec3, kMaxBendPoints> clear{};   // The same points moved 2 cm off the wedge, where validation rays turn.
     float length = 0.f;                               // Along the path, source to listener.
     Bands amplitude{};                                // Relative to free field at 1 m: wedge loss, air and the 1/r law.
     Vec3 arrival = vec3(0, 0, 0);                     // Unit vector from the listener toward the last bend.
@@ -44,6 +46,7 @@ struct DiffractionPath {
 
 struct DiffractionConfig {
     float maxDetour = 6.f;             // Metres of extra path. Past it even 62.5 Hz is down 17 dB more than at the boundary.
+    float maxRouteDetour = 30.f;       // The same for routes through baked probes, which go further round.
     std::uint32_t candidates = 8;      // Single edges kept, shortest detour first, to pair into two-edge paths.
     float speedOfSound = kDefaultSpeedOfSound;
     Bands air = airAttenuation();
