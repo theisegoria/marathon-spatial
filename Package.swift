@@ -28,7 +28,7 @@ let package = Package(
             dependencies: ["CMarathonSpatialMysofa"],
             path: ".",
             exclude: notEngine,
-            sources: ["src/core/Api.cpp", "src/core/Ambisonics.cpp", "src/core/Dsp.cpp", "src/core/Engine.cpp", "src/core/Speakers.cpp",
+            sources: ["src/core/Api.cpp", "src/core/Ambisonics.cpp", "src/core/Dsp.cpp", "src/core/Engine.cpp", "src/core/Speakers.cpp", "src/core/DeviceChannels.cpp",
                       "src/hrtf/HrtfBuild.cpp", "src/hrtf/HrtfFile.cpp", "src/hrtf/SphereHead.cpp"],
             publicHeadersPath: "include/CMarathonSpatial",
             cxxSettings: [.headerSearchPath("src"), .headerSearchPath("include"), .unsafeFlags(["-O3", "-fno-math-errno"], .when(configuration: .release))],

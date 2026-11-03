@@ -137,6 +137,7 @@ Marathon Spatial is being built in the open, and not everything above runs yet.
 | Marathon Spatial Studio | Builds on the library, with offline render tests. Used and listened to on macOS 27 |
 | Bundled measured HRTF sets | Four sets in [`data/hrtf`](data/hrtf/PROVENANCE.md) |
 | Loudspeaker layouts: VBAP panning and an AllRAD decoder, mono to 7.1.4 and custom | In the tree, with CPU tests; through the C API |
+| Multichannel live output: a channel per speaker, layout read from the device | In the tree, with CPU tests of the layout mapping and channel writing. Not yet run on a multichannel device |
 | Stereo speaker path | In Studio: an equal-power pan with distance gain and no reflections |
 
 Tests measure cues, levels and timing, and the author has listened to the result on headphones through Studio.

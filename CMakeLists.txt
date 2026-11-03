@@ -31,7 +31,7 @@ target_link_libraries(marathon_spatial_mysofa PUBLIC z)
 
 # The whole engine except device output: anything linking this alone cannot open an audio device.
 add_library(marathon_spatial_core STATIC
-    src/core/Api.cpp src/core/Ambisonics.cpp src/core/Dsp.cpp src/core/Engine.cpp src/core/Speakers.cpp
+    src/core/Api.cpp src/core/Ambisonics.cpp src/core/Dsp.cpp src/core/Engine.cpp src/core/Speakers.cpp src/core/DeviceChannels.cpp
     src/hrtf/HrtfBuild.cpp src/hrtf/HrtfFile.cpp src/hrtf/SphereHead.cpp)
 target_compile_features(marathon_spatial_core PUBLIC cxx_std_20)
 target_include_directories(marathon_spatial_core PUBLIC include PRIVATE src)

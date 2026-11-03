@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 
+#include "DeviceChannels.hpp"
 #include "WorkgroupJoin.hpp"
 #include "marathon_spatial/marathon_spatial_output.h"
 
@@ -23,6 +24,9 @@ struct ms_output {
     os_workgroup_join_token_s token{};
     mspatial::core::WorkgroupJoin join;  // Belongs to the device thread; reset only while that thread is stopped.
     std::vector<float> left, right;
+    std::vector<float> channelMemory;  // One maxFrames run per engine channel, for a speaker engine on a device with room for it.
+    std::vector<float*> channels;
+    std::uint32_t deviceChannels{}, engineChannels{2};
     bool running{};
     bool listening{};
     std::uint32_t maxFrames{};
@@ -81,6 +85,11 @@ OSStatus ioProc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList*, co
         for (UInt32 b = 0; b < output->mNumberBuffers; ++b) std::memset(output->mBuffers[b].mData, 0, output->mBuffers[b].mDataByteSize);
         return noErr;
     }
+    if (o->engineChannels > 2) {  // A channel per speaker, each to its own device channel.
+        ms_engine_render_speakers(o->engine, o->channels.data(), frames);
+        mspatial::core::writeDeviceChannels(o->channels.data(), o->engineChannels, frames, *output);
+        return noErr;
+    }
     float* left = o->left.data();
     float* right = o->right.data();
     ms_engine_render(o->engine, left, right, frames);
@@ -103,6 +112,18 @@ OSStatus ioProc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList*, co
         }
     }
     return noErr;
+}
+
+std::uint32_t outputChannels(AudioObjectID device) {
+    const AudioObjectPropertyAddress a = address(kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeOutput);
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(device, &a, 0, nullptr, &size) != noErr || size < sizeof(AudioBufferList)) return 0;
+    std::vector<unsigned char> bytes(size);
+    if (AudioObjectGetPropertyData(device, &a, 0, nullptr, &size, bytes.data()) != noErr) return 0;
+    const auto* list = reinterpret_cast<const AudioBufferList*>(bytes.data());
+    std::uint32_t total = 0;
+    for (UInt32 b = 0; b < list->mNumberBuffers; ++b) total += list->mBuffers[b].mNumberChannels;
+    return total;
 }
 
 ms_status resolveDevice(const char* uid, AudioObjectID& device) {
@@ -133,6 +154,25 @@ ms_status ms_output_default_sample_rate(float* sampleRate) {
     if (getProperty(device, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, rate) != noErr) return MS_ERR_DEVICE;
     *sampleRate = static_cast<float>(rate);
     return MS_OK;
+}
+
+ms_status ms_output_device_layout(const char* uid, ms_speaker_layout* layout) {
+    if (!layout) return MS_ERR_INVALID_ARGUMENT;
+    AudioObjectID device = kAudioObjectUnknown;
+    if (const ms_status status = resolveDevice(uid, device); status != MS_OK) return status;
+    const std::uint32_t channels = outputChannels(device);
+    if (channels == 0) return MS_ERR_DEVICE;
+    const AudioObjectPropertyAddress a = address(kAudioDevicePropertyPreferredChannelLayout, kAudioObjectPropertyScopeOutput);
+    UInt32 size = 0;
+    if (AudioObjectHasProperty(device, &a) && AudioObjectGetPropertyDataSize(device, &a, 0, nullptr, &size) == noErr &&
+        size >= offsetof(AudioChannelLayout, mChannelDescriptions)) {
+        std::vector<unsigned char> bytes(size);
+        if (AudioObjectGetPropertyData(device, &a, 0, nullptr, &size, bytes.data()) == noErr &&
+            mspatial::core::speakerLayoutFromChannelLayout(*reinterpret_cast<const AudioChannelLayout*>(bytes.data()), channels, *layout))
+            return MS_OK;
+    }
+    if (channels == 2) return ms_speaker_layout_preset(MS_SPEAKERS_STEREO, layout);
+    return MS_ERR_NOT_FOUND;
 }
 
 ms_status ms_output_create(ms_engine* engine, const char* uid, ms_output** output) {
@@ -176,6 +216,14 @@ ms_status ms_output_create(ms_engine* engine, const char* uid, ms_output** outpu
         return MS_ERR_DEVICE;  // No output streams.
     }
     o->latency.store(deviceLatency + safety + streamLatency, std::memory_order_relaxed);
+    o->deviceChannels = outputChannels(o->device);
+    // A speaker engine gets a channel per speaker when the device has them all; anything else plays stereo, folded down if need be.
+    const std::uint32_t speakers = ms_engine_output_channels(engine);
+    if (speakers > 2 && o->deviceChannels >= speakers) {
+        o->engineChannels = speakers;
+        o->channelMemory.resize(static_cast<std::size_t>(speakers) * o->maxFrames);
+        for (std::uint32_t c = 0; c < speakers; ++c) o->channels.push_back(o->channelMemory.data() + static_cast<std::size_t>(c) * o->maxFrames);
+    }
 
     os_workgroup_t workgroup = nullptr;
     if (getProperty(o->device, kAudioDevicePropertyIOThreadOSWorkgroup, kAudioObjectPropertyScopeGlobal, workgroup) == noErr) o->workgroup = workgroup;
@@ -236,6 +284,8 @@ void ms_output_get_stats(const ms_output* o, ms_output_stats* s) {
     s->workgroup_joined = o->joinedOnce.load(std::memory_order_relaxed);
     s->device_alive = o->alive.load(std::memory_order_relaxed);
     s->latency_frames = o->latency.load(std::memory_order_relaxed);
+    s->device_channels = o->deviceChannels;
+    s->engine_channels = o->engineChannels;
 }
 
 }  // extern "C"

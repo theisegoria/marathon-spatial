@@ -25,6 +25,7 @@
 #include "core/Ambisonics.hpp"
 #include "core/Dsp.hpp"
 #include "core/Engine.hpp"
+#include "core/DeviceChannels.hpp"
 #include "core/Fft.hpp"
 #include "core/Speakers.hpp"
 #include "core/WorkgroupJoin.hpp"
@@ -2261,6 +2262,80 @@ void testSpeakers() {
     CHECK(ms_engine_create(&d, &e) == MS_ERR_INVALID_ARGUMENT, "a layout of LFE channels alone is refused");
 }
 
+// A channel layout with descriptions, as a device would report one.
+std::vector<unsigned char> describedLayout(const std::vector<AudioChannelDescription>& descriptions) {
+    std::vector<unsigned char> bytes(offsetof(AudioChannelLayout, mChannelDescriptions) + descriptions.size() * sizeof(AudioChannelDescription));
+    auto* layout = reinterpret_cast<AudioChannelLayout*>(bytes.data());
+    layout->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
+    layout->mNumberChannelDescriptions = static_cast<UInt32>(descriptions.size());
+    std::memcpy(layout->mChannelDescriptions, descriptions.data(), descriptions.size() * sizeof(AudioChannelDescription));
+    return bytes;
+}
+
+void testDeviceChannels() {
+    gTest = "device channels";
+    const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    // A layout named by its tag: 5.1 in the MPEG order.
+    AudioChannelLayout tagged{};
+    tagged.mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A;
+    ms_speaker_layout layout;
+    CHECK(core::speakerLayoutFromChannelLayout(tagged, 6, layout) && layout.count == 6, "5.1 by tag");
+    const float azimuth51[] = {30, -30, 0, 0, 110, -110};
+    for (std::uint32_t c = 0; c < 6; ++c)
+        CHECK(c == 3 ? layout.speakers[c].lfe != 0 : (!layout.speakers[c].lfe && near(layout.speakers[c].azimuth_degrees, azimuth51[c])), "5.1 channel %u at %g", c,
+              layout.speakers[c].azimuth_degrees);
+    core::SpeakerLayout built;
+    CHECK(built.build(layout, 3), "the device's 5.1 builds");
+    // Dolby Atmos 7.1.4 by tag: twelve channels, four of them up.
+    tagged.mChannelLayoutTag = kAudioChannelLayoutTag_Atmos_7_1_4;
+    CHECK(core::speakerLayoutFromChannelLayout(tagged, 12, layout) && layout.count == 12, "7.1.4 by tag");
+    std::uint32_t up = 0, placed = 0;
+    for (std::uint32_t c = 0; c < 12; ++c) {
+        placed += !layout.speakers[c].lfe;
+        up += !layout.speakers[c].lfe && layout.speakers[c].elevation_degrees > 0.0f;
+    }
+    CHECK(placed == 11 && up == 4 && built.build(layout, 3), "7.1.4: %u placed, %u up", placed, up);
+    // Descriptions: coordinates (Core Audio's azimuth is positive to the right), a repeated position, a discrete channel, and a device with
+    // more channels than the layout describes.
+    AudioChannelDescription right45{kAudioChannelLabel_UseCoordinates, kAudioChannelFlags_SphericalCoordinates, {45, 20, 1}};
+    AudioChannelDescription left{kAudioChannelLabel_Left, 0, {}}, again{kAudioChannelLabel_LeftTotal, 0, {}}, discrete{kAudioChannelLabel_Discrete_0, 0, {}};
+    AudioChannelDescription box{kAudioChannelLabel_UseCoordinates, kAudioChannelFlags_RectangularCoordinates, {-1, 1, 0}};
+    const auto bytes = describedLayout({right45, left, again, discrete, box});
+    CHECK(core::speakerLayoutFromChannelLayout(*reinterpret_cast<const AudioChannelLayout*>(bytes.data()), 7, layout) && layout.count == 7, "described layout");
+    CHECK(near(layout.speakers[0].azimuth_degrees, -45) && near(layout.speakers[0].elevation_degrees, 20) && !layout.speakers[0].lfe, "spherical coordinates");
+    CHECK(near(layout.speakers[1].azimuth_degrees, 30) && layout.speakers[2].lfe && layout.speakers[3].lfe, "a repeated place and a discrete channel stay silent");
+    CHECK(near(layout.speakers[4].azimuth_degrees, 45) && near(layout.speakers[4].elevation_degrees, 0), "rectangular coordinates: front left");
+    CHECK(layout.speakers[5].lfe && layout.speakers[6].lfe, "channels past the layout stay silent");
+    const auto nothing = describedLayout({discrete});
+    CHECK(!core::speakerLayoutFromChannelLayout(*reinterpret_cast<const AudioChannelLayout*>(nothing.data()), 1, layout), "a layout that places nothing");
+
+    // Writing: one interleaved buffer of eight channels with six to fill, then one buffer per channel.
+    constexpr std::uint32_t frames = 16;
+    std::vector<std::vector<float>> source(6, std::vector<float>(frames));
+    std::vector<const float*> pointers;
+    for (std::uint32_t c = 0; c < 6; ++c) {
+        for (std::uint32_t t = 0; t < frames; ++t) source[c][t] = static_cast<float>(c * 100 + t);
+        pointers.push_back(source[c].data());
+    }
+    std::vector<float> interleaved(8 * frames, -1.0f);
+    AudioBufferList one{1, {{8, static_cast<UInt32>(interleaved.size() * sizeof(float)), interleaved.data()}}};
+    core::writeDeviceChannels(pointers.data(), 6, frames, one);
+    bool right = true;
+    for (std::uint32_t t = 0; t < frames; ++t)
+        for (std::uint32_t k = 0; k < 8; ++k) right = right && interleaved[t * 8 + k] == (k < 6 ? static_cast<float>(k * 100 + t) : 0.0f);
+    CHECK(right, "interleaved channels land in place, the rest silent");
+    std::vector<unsigned char> listBytes(offsetof(AudioBufferList, mBuffers) + 7 * sizeof(AudioBuffer));
+    auto* split = reinterpret_cast<AudioBufferList*>(listBytes.data());
+    split->mNumberBuffers = 7;
+    std::vector<std::vector<float>> planes(7, std::vector<float>(frames, -1.0f));
+    for (std::uint32_t b = 0; b < 7; ++b) split->mBuffers[b] = {1, frames * static_cast<UInt32>(sizeof(float)), planes[b].data()};
+    core::writeDeviceChannels(pointers.data(), 6, frames, *split);
+    right = true;
+    for (std::uint32_t b = 0; b < 7; ++b)
+        for (std::uint32_t t = 0; t < frames; ++t) right = right && planes[b][t] == (b < 6 ? static_cast<float>(b * 100 + t) : 0.0f);
+    CHECK(right, "a buffer per channel: each its own, the extra silent");
+}
+
 }  // namespace
 
 int main(int argumentCount, char** arguments) {
@@ -2311,6 +2386,7 @@ int main(int argumentCount, char** arguments) {
     run("near field", testNearField);
     run("ambisonics", testAmbisonics);
     run("speakers", testSpeakers);
+    run("device channels", testDeviceChannels);
     run("moving source", testMovingSourceStaysClean);
     run("voice overflow", testVoiceOverflow);
     run("master gain", testMasterGain);
