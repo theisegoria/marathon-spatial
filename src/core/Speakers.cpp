@@ -215,7 +215,7 @@ void SpeakerLayout::panPoints(Vec3 direction, float* pointGains) const noexcept 
             for (std::uint32_t p = 0; p < points_; ++p) pointGains[p] = 1.0f;
             return;
         }
-        // The pair whose arc holds the direction. An arc of half a turn or more (behind a front-only layout) pans by angle instead.
+        // The pair whose arc holds the direction. An arc of half a turn or more (behind a front-only layout) pans by lateral position instead.
         const float angle = std::atan2(-x, -z);
         for (const Pair& pair : pairs_) {
             float into = angle - pair.from;
@@ -223,7 +223,10 @@ void SpeakerLayout::panPoints(Vec3 direction, float* pointGains) const noexcept 
             while (into >= 2.0f * kPi) into -= 2.0f * kPi;
             if (into > pair.arc) continue;
             if (pair.reflex) {
-                const float t = into / pair.arc;
+                // Behind or wide of a front-only pair: pan by how far left or right the sound is, so a sound hard left plays from the left
+                // speaker alone and one straight behind from both.
+                const float lateral = x / std::sqrt(x * x + z * z), xa = point_[pair.a].x, xb = point_[pair.b].x;
+                const float t = std::fabs(xb - xa) > 1e-4f ? std::clamp((lateral - xa) / (xb - xa), 0.0f, 1.0f) : 0.5f;
                 pointGains[pair.a] = std::cos(0.5f * kPi * t);
                 pointGains[pair.b] = std::sin(0.5f * kPi * t);
             } else {

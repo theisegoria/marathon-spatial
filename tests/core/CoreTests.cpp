@@ -2261,6 +2261,83 @@ void testSpeakers() {
     d.speakers.speakers[0] = {0, 0, 1};
     d.speakers.speakers[1] = {10, 0, 1};
     CHECK(ms_engine_create(&d, &e) == MS_ERR_INVALID_ARGUMENT, "a layout of LFE channels alone is refused");
+
+    // A stereo pair outside its own arc pans by lateral position: hard left from the left speaker alone, straight behind from both.
+    ms_speaker_layout stereo;
+    OK(ms_speaker_layout_preset(MS_SPEAKERS_STEREO, &stereo));
+    float pair[core::kMaxSpeakers];
+    OK(ms_speaker_layout_pan(&stereo, {-1, 0, 0}, pair));
+    CHECK(std::fabs(pair[0] - 1.0f) < 1e-5f && std::fabs(pair[1]) < 1e-5f, "hard left on stereo: %g %g", pair[0], pair[1]);
+    OK(ms_speaker_layout_pan(&stereo, {0, 0, 1}, pair));
+    CHECK(std::fabs(pair[0] - pair[1]) < 1e-5f, "straight behind on stereo: %g %g", pair[0], pair[1]);
+
+    // A headphone engine switches to stereo speakers and back at run time, keeping two output channels.
+    const auto stereoRun = [&](const ms_speaker_layout* layout, ms_vec3 at, bool bed, float* left, float* right) {
+        ms_engine* h = makeEngine(gSphere);
+        std::vector<float> noise(9600 * 4);
+        std::mt19937 noiseRng(19);
+        std::normal_distribution<float> n(0.0f, 0.1f);
+        ms_buffer b;
+        if (bed) {
+            for (std::uint32_t t = 0; t < 9600; ++t) {
+                const float v = n(noiseRng);
+                noise[4 * t] = v;
+                noise[4 * t + 1] = v;  // AmbiX Y: from the left.
+                noise[4 * t + 2] = 0;
+                noise[4 * t + 3] = 0;
+            }
+            OK(ms_buffer_create(h, noise.data(), 9600, 4, kRate, &b));
+            ms_bed bd;
+            OK(ms_bed_create(h, &bd));
+            OK(ms_bed_set_buffer(h, bd, b, 1));
+            OK(ms_bed_play(h, bd, 0));
+        } else {
+            for (std::uint32_t t = 0; t < 9600; ++t) noise[t] = n(noiseRng);
+            OK(ms_buffer_create(h, noise.data(), 9600, 1, kRate, &b));
+            ms_source src;
+            OK(ms_source_create(h, &src));
+            const ms_source_params params = plainParams(at);
+            OK(ms_source_set_params(h, src, &params));
+            OK(ms_source_set_buffer(h, src, b, 0, 1));
+            OK(ms_source_play(h, src, 0));
+        }
+        OK(ms_engine_set_speaker_layout(h, layout));
+        OK(ms_engine_commit(h));
+        CHECK(ms_engine_output_channels(h) == 2, "two channels either way");
+        Render r = renderFrames(h, 9600);
+        double el = 0, er = 0;
+        for (std::uint32_t t = 1024; t < 9600; ++t) {
+            el += r.l[t] * r.l[t];
+            er += r.r[t] * r.r[t];
+        }
+        *left = float(el);
+        *right = float(er);
+        ms_engine_destroy(h);
+    };
+    float sl, sr, hl, hr, bl, br;
+    stereoRun(&stereo, {-2, 0, 0}, false, &sl, &sr);
+    stereoRun(nullptr, {-2, 0, 0}, false, &hl, &hr);
+    stereoRun(&stereo, {}, true, &bl, &br);
+    std::printf("  hard-left source: stereo speakers L %.3g R %.3g; headphones L %.3g R %.3g; bed from the left on stereo L %.3g R %.3g\n", sl, sr, hl, hr,
+                bl, br);
+    CHECK(sl > 0 && sr < 1e-6f * sl, "on stereo speakers a hard-left source plays from the left speaker alone");
+    CHECK(hr > 1e-3f * hl, "on headphones the far ear still hears it, through the head");
+    CHECK(bl > 4.0f * br, "a bed from the left decodes to the left speaker");
+    ms_engine* fixed = nullptr;
+    ms_engine_desc fixedDesc;
+    ms_engine_desc_default(&fixedDesc);
+    fixedDesc.speakers = surround;
+    OK(ms_engine_create(&fixedDesc, &fixed));
+    CHECK(ms_engine_set_speaker_layout(fixed, &stereo) == MS_ERR_UNSUPPORTED, "a layout engine keeps its layout");
+    ms_engine_destroy(fixed);
+    ms_engine* flexible = makeEngine(gSphere);
+    CHECK(ms_engine_set_speaker_layout(flexible, &surround) == MS_ERR_INVALID_ARGUMENT, "a headphone engine takes two-speaker layouts only");
+    OK(ms_engine_set_speaker_layout(flexible, &stereo));
+    OK(ms_engine_set_speaker_layout(flexible, nullptr));
+    OK(ms_engine_commit(flexible));
+    std::vector<float> l(4096), r(4096);
+    ms_engine_render(flexible, l.data(), r.data(), 4096);
+    ms_engine_destroy(flexible);
 }
 
 // A channel layout with descriptions, as a device would report one.

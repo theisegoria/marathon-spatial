@@ -47,7 +47,7 @@ struct ListenerSnapshot {
 enum class CommandType : std::uint32_t {
     SourceReset, SourceBuffer, SourceCallback, SourcePlay, SourceStop, SourceSeek,
     BedReset, BedBuffer, BedCallback, BedPlay, BedStop,
-    BusProcessor, BlockCallback, BufferRetire, SetHrtf, SetCrosstalk
+    BusProcessor, BlockCallback, BufferRetire, SetHrtf, SetCrosstalk, SetSpeakers
 };
 
 struct Command {
@@ -62,7 +62,7 @@ struct Command {
 };
 
 struct Retired {
-    enum class Kind : std::uint32_t { Buffer, Hrtf, Crosstalk } kind;
+    enum class Kind : std::uint32_t { Buffer, Hrtf, Crosstalk, Speakers } kind;
     void* pointer;
     void* pointer2;
 };
@@ -221,6 +221,8 @@ struct ms_engine {
     std::uint32_t highestSource{};
     std::vector<std::unique_ptr<mspatial::core::CrosstalkFilter>> heldCrosstalk;  // Freed when the render side retires them.
     const mspatial::core::CrosstalkFilter* currentCrosstalk{};
+    std::vector<std::unique_ptr<mspatial::core::SpeakerLayout>> heldLayouts;  // Freed when the render side retires them.
+    const mspatial::core::SpeakerLayout* currentLayout{};
 
     // The boundary.
     mspatial::core::TripleIndex triple;
@@ -257,7 +259,11 @@ struct ms_engine {
     std::uint32_t fifoRead{}, fifoFill{}, fifoChannels{2};
     // Speakers: 0 for headphones. The mix holds one channel per speaker, past the buses, before the master's gain.
     std::uint32_t speakers{};
-    mspatial::core::SpeakerLayout layout;
+    // The layout in use, or none. A layout given at creation is fixed; a headphone engine may switch to a two-speaker layout and back at
+    // run time (ms_engine_set_speaker_layout), which leaves its output two channels either way.
+    const mspatial::core::SpeakerLayout* layout{};
+    const mspatial::core::SpeakerLayout* retiringLayout{};
+    bool fixedLayout{};
     mspatial::core::Aligned<float> speakerMix;
     // Crosstalk cancellation on the stereo master: the filter in use, the one it replaces during this block's crossfade, and the history of
     // the sum and difference channels, which keeps running once a filter has ever been set so a later one starts with a full window.

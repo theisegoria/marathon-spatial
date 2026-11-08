@@ -73,6 +73,12 @@ void collectRetired(ms_engine& e) {
                     e.retiringBuffers.erase(e.retiringBuffers.begin() + static_cast<std::ptrdiff_t>(i));
                     break;
                 }
+        } else if (r.kind == Retired::Kind::Speakers) {
+            for (std::size_t i = 0; i < e.heldLayouts.size(); ++i)
+                if (e.heldLayouts[i].get() == r.pointer) {
+                    e.heldLayouts.erase(e.heldLayouts.begin() + static_cast<std::ptrdiff_t>(i));
+                    break;
+                }
         } else if (r.kind == Retired::Kind::Crosstalk) {
             for (std::size_t i = 0; i < e.heldCrosstalk.size(); ++i)
                 if (e.heldCrosstalk[i].get() == r.pointer) {
@@ -210,7 +216,7 @@ void ms_crosstalk_params_follow_head(ms_crosstalk_params* p, const ms_head_posit
 ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* params) {
     if (!engine) return MS_ERR_INVALID_ARGUMENT;
     ms_engine& e = *engine;
-    if (e.speakers) return params && params->enabled ? MS_ERR_UNSUPPORTED : MS_OK;
+    if (e.fixedLayout) return params && params->enabled ? MS_ERR_UNSUPPORTED : MS_OK;
     // Designed before the lock: it takes a few milliseconds, and nothing it reads changes after creation.
     std::unique_ptr<mspatial::core::CrosstalkFilter> filter;
     if (params && params->enabled) {
@@ -222,6 +228,23 @@ ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* 
     e.currentCrosstalk = filter.get();
     if (filter) e.heldCrosstalk.push_back(std::move(filter));
     queue(e, CommandType::SetCrosstalk, 0, 0, 0, 0, 0.0, const_cast<mspatial::core::CrosstalkFilter*>(e.currentCrosstalk));
+    return MS_OK;
+}
+
+ms_status ms_engine_set_speaker_layout(ms_engine* engine, const ms_speaker_layout* layout) {
+    if (!engine) return MS_ERR_INVALID_ARGUMENT;
+    ms_engine& e = *engine;
+    if (e.fixedLayout) return MS_ERR_UNSUPPORTED;
+    std::unique_ptr<mspatial::core::SpeakerLayout> built;
+    if (layout) {
+        built = std::make_unique<mspatial::core::SpeakerLayout>();
+        if (!built->build(*layout, e.desc.ambisonic_order) || built->count() != 2) return MS_ERR_INVALID_ARGUMENT;
+    }
+    Guard guard(engine);
+    if (!built && !e.currentLayout) return MS_OK;
+    e.currentLayout = built.get();
+    if (built) e.heldLayouts.push_back(std::move(built));
+    queue(e, CommandType::SetSpeakers, 0, 0, 0, 0, 0.0, const_cast<mspatial::core::SpeakerLayout*>(e.currentLayout));
     return MS_OK;
 }
 
@@ -340,10 +363,15 @@ ms_status ms_engine_create(const ms_engine_desc* desc, ms_engine** engine) {
         e.ranking.reset(d.max_sources);
         e.scratch.reset(16ull * B + kMaxFilterTaps + 64);
         if (d.speakers.count > 0) {
-            if (!e.layout.build(d.speakers, d.ambisonic_order)) return MS_ERR_INVALID_ARGUMENT;
-            e.speakers = e.layout.count();
-            e.speakerMix.reset(static_cast<std::size_t>(e.speakers) * B);
+            auto layout = std::make_unique<mspatial::core::SpeakerLayout>();
+            if (!layout->build(d.speakers, d.ambisonic_order)) return MS_ERR_INVALID_ARGUMENT;
+            e.speakers = layout->count();
+            e.layout = e.currentLayout = layout.get();
+            e.heldLayouts.push_back(std::move(layout));
+            e.fixedLayout = true;
         }
+        // Room for a layout's channels, or for the two of a stereo layout a headphone engine may switch to.
+        e.speakerMix.reset(static_cast<std::size_t>(std::max(e.speakers, 2u)) * B);
         e.fifo.reset(static_cast<std::size_t>(std::max(e.speakers, 2u)) * B);
         e.crosstalkPartitions = (kMaxCrosstalkTaps + B - 1) / B;
         e.crosstalkWindow.reset(4ull * B);

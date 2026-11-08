@@ -192,6 +192,11 @@ uint64_t ms_engine_render_speakers(ms_engine* engine, float* const* channels, ui
 ms_status ms_engine_set_crosstalk(ms_engine* engine, const ms_crosstalk_params* params);
 /* The delay the canceller adds while on, in frames; 0 when it is off. */
 uint32_t ms_engine_crosstalk_latency_frames(const ms_engine* engine);
+/* Switches a headphone engine to a two-speaker layout, such as MS_SPEAKERS_STEREO, or back to headphones with NULL, at the next commit.
+   Sources then pan between the two speakers and the ambisonic mix, with beds and reflections, decodes to them; the output stays two
+   channels, so a device need not reopen. The canceller set by ms_engine_set_crosstalk rests while a layout is in use. MS_ERR_UNSUPPORTED
+   on an engine created with a layout, MS_ERR_INVALID_ARGUMENT for a layout without exactly two speakers. */
+ms_status ms_engine_set_speaker_layout(ms_engine* engine, const ms_speaker_layout* layout);
 /* 2 for headphones, else the layout's speaker count. */
 uint32_t ms_engine_output_channels(const ms_engine* engine);
 

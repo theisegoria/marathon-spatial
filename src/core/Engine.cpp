@@ -302,6 +302,15 @@ void processCommands(ms_engine& e) {
                 (void)e.retired.push({Retired::Kind::Buffer, buffer, nullptr});
                 break;
             }
+            case CommandType::SetSpeakers: {
+                // At a block boundary: the old layout goes back once this block is done with it.
+                if (e.retiringLayout) (void)e.retired.push({Retired::Kind::Speakers, const_cast<SpeakerLayout*>(e.retiringLayout), nullptr});
+                e.retiringLayout = e.layout;
+                e.layout = static_cast<const SpeakerLayout*>(c.pointer);
+                e.speakers = e.layout ? e.layout->count() : 0;
+                for (std::uint32_t i = 0; i < e.desc.max_sources; ++i) e.sources[i].haveSpeakerGain = false;
+                break;
+            }
             case CommandType::SetCrosstalk: {
                 if (e.retiringCrosstalk) (void)e.retired.push({Retired::Kind::Crosstalk, const_cast<CrosstalkFilter*>(e.retiringCrosstalk), nullptr});
                 e.retiringCrosstalk = e.previousCrosstalk;
@@ -702,7 +711,7 @@ void renderDirect(ms_engine& e, RenderSource& s, const SourceSnapshot& snap, con
 void renderSpeakers(ms_engine& e, RenderSource& s, const float* mono, float mixFrom, float mixTo, Vec3 direction, std::uint32_t busIndex) {
     const std::uint32_t B = e.B, N = e.speakers;
     float target[kMaxSpeakers];
-    e.layout.pan(direction, target);
+    e.layout->pan(direction, target);
     if (!s.haveSpeakerGain) {
         std::memcpy(s.speakerGain, target, N * sizeof(float));
         s.haveSpeakerGain = true;
@@ -1040,9 +1049,9 @@ void decodeMix(ms_engine& e) {
         // AllRAD: one matrix row per speaker, no filters and no latency.
         if (e.shActiveBlocks == 0 || e.C == 0) return;
         --e.shActiveBlocks;
-        const std::uint32_t B = e.B, C = std::min(e.C, e.layout.decodeChannels());
+        const std::uint32_t B = e.B, C = std::min(e.C, e.layout->decodeChannels());
         for (std::uint32_t k = 0; k < e.speakers; ++k) {
-            const float* row = e.layout.decodeRow(k);
+            const float* row = e.layout->decodeRow(k);
             float* out = e.speakerMix.data() + static_cast<std::size_t>(k) * B;
             for (std::uint32_t c = 0; c < C; ++c)
                 if (row[c] != 0.0f) vDSP_vsma(e.shMix.data() + static_cast<std::size_t>(c) * B, 1, &row[c], out, 1, out, 1, B);
@@ -1285,6 +1294,7 @@ void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
     if (e.retiringSet) {
         if (e.retired.push({Retired::Kind::Hrtf, e.retiringSet, nullptr})) e.retiringSet = nullptr;
     }
+    if (e.retiringLayout && e.retired.push({Retired::Kind::Speakers, const_cast<SpeakerLayout*>(e.retiringLayout), nullptr})) e.retiringLayout = nullptr;
     const float masterTo = e.frameBuses[0].gain, masterFrom = e.buses[0].primed ? e.buses[0].gain : masterTo;
     mixBuses(e);
 
@@ -1298,7 +1308,7 @@ void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
         for (std::uint32_t k = 0; k < F; ++k) {
             float* out = finals[k] = e.speakerMix.data() + static_cast<std::size_t>(k) * B;
             applyRamp(out, B, masterFrom, masterTo);
-            const float gl = e.layout.stereoIn(0)[k], gr = e.layout.stereoIn(1)[k];
+            const float gl = e.layout->stereoIn(0)[k], gr = e.layout->stereoIn(1)[k];
             if (gl != 0.0f) vDSP_vsma(master.left, 1, &gl, out, 1, out, 1, B);
             if (gr != 0.0f) vDSP_vsma(master.right, 1, &gr, out, 1, out, 1, B);
         }
@@ -1356,7 +1366,7 @@ void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
         for (std::uint32_t side = 0; side < 2; ++side) {
             std::memset(outs[side], 0, B * sizeof(float));
             for (std::uint32_t k = 0; k < F; ++k) {
-                const float g = e.layout.stereoOut(side)[k];
+                const float g = e.layout->stereoOut(side)[k];
                 if (g != 0.0f) vDSP_vsma(finals[k], 1, &g, outs[side], 1, outs[side], 1, B);
             }
         }

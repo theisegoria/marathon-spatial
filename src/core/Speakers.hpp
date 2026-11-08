@@ -46,7 +46,7 @@ private:
         std::uint32_t a, b;
         float inverse[4];
         float from, arc;  // Azimuth of a and the arc to b, anticlockwise, in radians.
-        bool reflex;      // The arc is half a turn or more: no amplitude pair can span it, so it pans by angle.
+        bool reflex;      // The arc is half a turn or more: no amplitude pair can span it, so it pans by lateral position.
     };
     enum class Mode { Single, Ring, Sphere };
 
