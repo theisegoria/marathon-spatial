@@ -3,6 +3,7 @@
 // continuous contact force, culled per voice, with energy-based voice stealing.
 #include "marathon_spatial/physics/Modal.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <numbers>
@@ -58,7 +59,11 @@ struct DriveState{
 struct ModalSynth::Impl{
     ModalSynthSettings s;
     std::uint32_t capacity{}; // per-voice slots padded to a multiple of Lanes
-    std::vector<PreparedModel> models;
+    // Fixed at construction: registration writes the next entry, then publishes the count, so a reader on another thread sees only
+    // complete models and none ever moves.
+    std::unique_ptr<PreparedModel[]> models;
+    std::atomic<std::uint32_t> modelCount{0};
+    [[nodiscard]] std::uint32_t modelsPublished() const noexcept {return modelCount.load(std::memory_order_acquire);}
     std::vector<std::uint8_t> active;
     std::vector<std::uint64_t> instance;
     std::vector<ModalModelHandle> model;
@@ -128,10 +133,12 @@ ModalSynth::ModalSynth(const ModalSynthSettings& s):impl_(std::make_unique<Impl>
     if(!std::isfinite(s.sampleRateHz)||s.sampleRateHz<8000||s.sampleRateHz>384000)bad("sample rate must be in 8..384 kHz");
     if(s.maximumVoices<1||s.maximumVoices>ModalSynthSettings::MaximumVoices)bad("maximum voices must be in 1.."+std::to_string(ModalSynthSettings::MaximumVoices));
     if(s.maximumModesPerVoice<1||s.maximumModesPerVoice>ModalSynthSettings::MaximumModesPerVoice)bad("maximum modes per voice must be in 1.."+std::to_string(ModalSynthSettings::MaximumModesPerVoice));
+    if(s.maximumModels<1||s.maximumModels>ModalSynthSettings::MaximumModels)bad("maximum models must be in 1.."+std::to_string(ModalSynthSettings::MaximumModels));
     if(s.maximumBlockFrames<1||s.maximumBlockFrames>ModalSynthSettings::MaximumBlockFrames)bad("maximum block frames must be in 1.."+std::to_string(ModalSynthSettings::MaximumBlockFrames));
     if(!std::isfinite(s.cullAmplitude)||s.cullAmplitude<0)bad("cull amplitude must be finite and non-negative");
     if(!std::isfinite(s.outputGain)||!(s.outputGain>0)||s.outputGain>1e6)bad("output gain must be finite in (0, 1e6]");
     auto& m=*impl_;m.s=s;m.capacity=(s.maximumModesPerVoice+Lanes-1)/Lanes*Lanes;
+    m.models=std::make_unique<PreparedModel[]>(s.maximumModels);
     const std::size_t slots=std::size_t(s.maximumVoices)*m.capacity;
     m.active.assign(s.maximumVoices,0);m.instance.assign(s.maximumVoices,0);m.model.assign(s.maximumVoices,0);m.count.assign(s.maximumVoices,0);
     for(auto* v:{&m.c1,&m.c2,&m.y1,&m.y2,&m.w,&m.in})v->assign(slots,0.);
@@ -149,7 +156,8 @@ ModalModelHandle ModalSynth::registerModel(std::shared_ptr<const ModalModel> mod
     if(!model)throw std::invalid_argument("modal synth: null model");
     validateModalModel(*model);
     auto& m=*impl_;
-    if(m.models.size()>=std::numeric_limits<std::uint32_t>::max())throw std::invalid_argument("modal synth: model table full");
+    const std::uint32_t next=m.modelCount.load(std::memory_order_relaxed);
+    if(next>=m.s.maximumModels)throw std::invalid_argument("modal synth: model table full");
     PreparedModel p;p.modes.resize(model->modes.size());
     const double T=1/m.s.sampleRateHz;
     for(std::size_t k=0;k<model->modes.size();++k){
@@ -170,15 +178,16 @@ ModalModelHandle ModalSynth::registerModel(std::shared_ptr<const ModalModel> mod
         q.forceToState=T*q.r*q.sinTheta/q.omegaDamped;
     }
     p.model=std::move(model);
-    m.models.push_back(std::move(p));
-    return static_cast<ModalModelHandle>(m.models.size()-1);
+    m.models[next]=std::move(p);
+    m.modelCount.store(next+1,std::memory_order_release);
+    return static_cast<ModalModelHandle>(next);
 }
 
 ModalExciteResult ModalSynth::excite(const ModalExcitation& e){
     auto& m=*impl_;
     const auto bad=[](const std::string& what){throw std::invalid_argument("modal excite: "+what);};
     if(e.instance==0)bad("instance key must be nonzero");
-    if(e.model>=m.models.size())bad("unknown model handle");
+    if(e.model>=m.modelsPublished())bad("unknown model handle");
     if(!std::isfinite(e.impulseNs)||e.impulseNs<0)bad("impulse must be finite and non-negative");
     if(!std::isfinite(e.contactSeconds)||e.contactSeconds<MinimumContactSeconds||e.contactSeconds>MaximumContactSeconds)bad("contact duration outside 1 us..100 ms");
     if(!std::isfinite(e.perceptualWeight)||!(e.perceptualWeight>0))bad("perceptual weight must be finite and positive");
@@ -235,7 +244,7 @@ ModalExciteResult ModalSynth::drive(const ModalDrive& d){
     auto& m=*impl_;
     const auto bad=[](const std::string& what){throw std::invalid_argument("modal drive: "+what);};
     if(d.instance==0)bad("instance key must be nonzero");
-    if(d.model>=m.models.size())bad("unknown model handle");
+    if(d.model>=m.modelsPublished())bad("unknown model handle");
     if(!std::isfinite(d.forceRmsN)||d.forceRmsN<0)bad("force must be finite and non-negative");
     if(!std::isfinite(d.cutoffHz)||!(d.cutoffHz>0))bad("cutoff must be finite and positive");
     if(!std::isfinite(d.rampSeconds)||d.rampSeconds<0)bad("ramp must be finite and non-negative");
@@ -307,10 +316,10 @@ bool ModalSynth::driven(std::uint32_t slot) const noexcept {
     const auto& m=*impl_;
     return slot<m.s.maximumVoices&&m.active[slot]&&m.drives[slot].active;
 }
-std::uint32_t ModalSynth::modelCount() const noexcept {return static_cast<std::uint32_t>(impl_->models.size());}
+std::uint32_t ModalSynth::modelCount() const noexcept {return impl_->modelsPublished();}
 std::uint32_t ModalSynth::sampleCount(ModalModelHandle model) const noexcept {
     const auto& m=*impl_;
-    return model<m.models.size()?static_cast<std::uint32_t>(m.models[model].model->samples.size()):0;
+    return model<m.modelsPublished()?static_cast<std::uint32_t>(m.models[model].model->samples.size()):0;
 }
 std::uint64_t ModalSynth::instanceIn(std::uint32_t slot) const noexcept {
     const auto& m=*impl_;

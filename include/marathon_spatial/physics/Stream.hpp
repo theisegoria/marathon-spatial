@@ -1,7 +1,8 @@
 #pragma once
 // ContactAudio on a live engine. One control thread posts physics facts; the
 // render thread runs the synth and hands each modal voice to its own spatial
-// source. Posting and pulling never lock or allocate.
+// source. Posting and pulling never lock or allocate. The control thread may go on
+// registering models and surfaces while the stream runs.
 //
 //   PhysicsStream stream(audio);
 //   ms_engine_set_block_callback(engine,blockCallback,&stream);
@@ -24,7 +25,8 @@ void blockCallback(void* user,uint32_t frames,uint64_t frame) noexcept;
 class PhysicsStream {
 public:
     // audio must outlive the stream. After this, audio belongs to the render side,
-    // apart from what was registered before streaming began.
+    // except registerModel, registerSurface and the valid checks, which the control
+    // thread may still call.
     explicit PhysicsStream(ContactAudio& audio,std::uint32_t commandCapacity=2048);
     ~PhysicsStream();
     PhysicsStream(const PhysicsStream&)=delete;
@@ -35,6 +37,7 @@ public:
     bool postImpact(const ModalExcitation& excitation,double delaySeconds=0) noexcept;
     bool postEnd(std::uint64_t contact,double rampSeconds=.03) noexcept;
     bool postStop(std::uint64_t instance) noexcept;
+    bool postDrive(const ModalDrive& drive) noexcept;
     // Which instance a voice slot sounds as of the last block; 0 when idle. Any thread.
     [[nodiscard]] std::uint64_t instanceIn(std::uint32_t slot) const noexcept;
     [[nodiscard]] std::uint64_t droppedCommands() const noexcept;

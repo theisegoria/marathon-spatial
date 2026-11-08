@@ -1,5 +1,6 @@
 // Contact forces and the sample-accurate contact voice manager.
 #include "marathon_spatial/physics/Contact.hpp"
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -155,7 +156,8 @@ struct Contact {
 struct ContactAudio::Impl {
     ContactAudioSettings s;
     ModalSynth synth;
-    std::vector<std::shared_ptr<const SurfaceProfile>> surfaces;
+    std::unique_ptr<std::shared_ptr<const SurfaceProfile>[]> surfaces;  // fixed at construction; see surfaceCount
+    std::atomic<std::uint32_t> surfaceCount{0};
     std::vector<Contact> contacts;
     std::vector<Hit> hits;           // binary heap, capacity fixed at construction
     std::vector<float> forces;       // contacts x maximumBlockFrames
@@ -170,6 +172,8 @@ ContactAudio::ContactAudio(const ContactAudioSettings& s):impl_(std::make_unique
     if(s.maximumContacts<1||s.maximumContacts>s.synth.maximumVoices)throw std::invalid_argument("contact audio: maximum contacts must be in 1..maximumVoices");
     if(s.maximumScheduledHits<1||s.maximumScheduledHits>1u<<20)throw std::invalid_argument("contact audio: maximum scheduled hits outside 1..2^20");
     auto& m=*impl_;
+    if(s.maximumSurfaces<1||s.maximumSurfaces>1u<<16)throw std::invalid_argument("contact audio: maximum surfaces outside 1..65536");
+    m.surfaces=std::make_unique<std::shared_ptr<const SurfaceProfile>[]>(s.maximumSurfaces);
     m.contacts.assign(s.maximumContacts,Contact{});
     m.hits.reserve(s.maximumScheduledHits);
     m.forces.assign(std::size_t(s.maximumContacts)*s.synth.maximumBlockFrames,0.f);
@@ -181,8 +185,24 @@ ContactAudio& ContactAudio::operator=(ContactAudio&&) noexcept=default;
 ModalModelHandle ContactAudio::registerModel(std::shared_ptr<const ModalModel> model){return impl_->synth.registerModel(std::move(model));}
 SurfaceHandle ContactAudio::registerSurface(std::shared_ptr<const SurfaceProfile> surface){
     if(!surface)throw std::invalid_argument("contact audio: null surface");
-    impl_->surfaces.push_back(std::move(surface));
-    return static_cast<SurfaceHandle>(impl_->surfaces.size()-1);
+    auto& m=*impl_;
+    const std::uint32_t next=m.surfaceCount.load(std::memory_order_relaxed);
+    if(next>=m.s.maximumSurfaces)throw std::invalid_argument("contact audio: surface table full");
+    m.surfaces[next]=std::move(surface);
+    m.surfaceCount.store(next+1,std::memory_order_release);
+    return static_cast<SurfaceHandle>(next);
+}
+bool ContactAudio::valid(const ModalDrive& d) const noexcept {
+    const auto& m=*impl_;
+    const auto samples=m.synth.sampleCount(d.model);
+    if(d.instance==0||samples==0||!std::isfinite(d.forceRmsN)||d.forceRmsN<0||!std::isfinite(d.cutoffHz)||!(d.cutoffHz>0))return false;
+    if(!std::isfinite(d.rampSeconds)||d.rampSeconds<0||!std::isfinite(d.perceptualWeight)||!(d.perceptualWeight>0)||d.externalForce)return false;
+    return d.sample?*d.sample<samples:std::isfinite(d.localPosition.x)&&std::isfinite(d.localPosition.y)&&std::isfinite(d.localPosition.z);
+}
+bool ContactAudio::drive(const ModalDrive& d) noexcept {
+    if(!valid(d))return false;
+    try{(void)impl_->synth.drive(d);}catch(...){return false;}
+    return true;
 }
 bool ContactAudio::valid(const ModalExcitation& e) const noexcept {
     const auto& m=*impl_;
@@ -202,7 +222,7 @@ bool ContactAudio::valid(const ContactUpdate& u) const noexcept {
     if(!std::isfinite(f.speedMPerS)||f.speedMPerS<0||!std::isfinite(f.normalForceN)||f.normalForceN<0||!std::isfinite(f.fluctuation)||f.fluctuation<0||!std::isfinite(f.forceScaleN))return false;
     if(!std::isfinite(f.smoothingSeconds)||f.smoothingSeconds<0)return false;
     if(f.kind==ContactKind::Source)return f.source!=nullptr;
-    if(!u.surface||*u.surface>=m.surfaces.size())return false;
+    if(!u.surface||*u.surface>=m.surfaceCount.load(std::memory_order_acquire))return false;
     if(f.kind==ContactKind::Roll)return std::isfinite(f.radiusM)&&f.radiusM>0&&std::isfinite(f.effectiveModulusPa)&&f.effectiveModulusPa>0&&f.flats>0&&std::isfinite(f.outOfRound);
     return std::isfinite(f.stribeckSpeedMPerS)&&f.stribeckSpeedMPerS>0;
 }

@@ -95,6 +95,7 @@ struct ContactAudioSettings {
     ModalSynthSettings synth{};
     std::uint32_t maximumContacts{16};        // <= synth.maximumVoices
     std::uint32_t maximumScheduledHits{4096};
+    std::uint32_t maximumSurfaces{256};       // fixed at construction, like the synth's model table, so either can grow while rendering
 };
 // One update of a sustained contact. contact is a nonzero key for this touch,
 // not for the body: two touches on one body are two contacts. Speed, force and
@@ -124,6 +125,7 @@ public:
     // Whether a call would be accepted, for a host checking before it crosses to the render thread.
     [[nodiscard]] bool valid(const ModalExcitation& excitation) const noexcept;
     [[nodiscard]] bool valid(const ContactUpdate& update) const noexcept;
+    [[nodiscard]] bool valid(const ModalDrive& drive) const noexcept;
     // Queues a hit delaySeconds from the next rendered frame, sample accurate.
     // Returns false when the queue is full or the hit is invalid. Hits at the same
     // frame play in call order.
@@ -133,6 +135,8 @@ public:
     bool update(const ContactUpdate& update);
     void end(std::uint64_t contact,double rampSeconds=.03) noexcept;
     void stop(std::uint64_t instance) noexcept;
+    // Drives a voice with band-limited force, as ModalSynth::drive. Returns false for an invalid drive.
+    bool drive(const ModalDrive& drive) noexcept;
     // Same layout as ModalSynth::render, for any frame count.
     void render(std::span<float> bus,std::span<float> voices,std::size_t frames);
     [[nodiscard]] std::uint32_t activeContacts() const noexcept;

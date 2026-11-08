@@ -165,8 +165,10 @@ struct HertzContact {
 [[nodiscard]] double hertzContactSeconds(const HertzContact& contact);
 
 struct ModalSynthSettings {
-    static constexpr std::uint32_t MaximumVoices=64,MaximumModesPerVoice=256,MaximumBlockFrames=8192;
+    static constexpr std::uint32_t MaximumVoices=64,MaximumModesPerVoice=256,MaximumBlockFrames=8192,MaximumModels=1u<<16;
     double sampleRateHz{48000};
+    // The model table is fixed at construction, so a model registered while another thread renders never moves the ones in use.
+    std::uint32_t maximumModels{4096};
     std::uint32_t maximumVoices{16};
     std::uint32_t maximumModesPerVoice{64};
     std::uint32_t maximumBlockFrames{1024};

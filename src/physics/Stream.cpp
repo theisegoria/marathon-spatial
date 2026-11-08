@@ -15,11 +15,12 @@ uint32_t blockSourceCallback(void* user,float* mono,uint32_t frames) noexcept {
 }
 void blockCallback(void* user,uint32_t frames,uint64_t) noexcept {static_cast<PhysicsStream*>(user)->renderBlock(frames);}
 namespace {
-enum class Kind : std::uint8_t {Update,Impact,End,Stop};
+enum class Kind : std::uint8_t {Update,Impact,End,Stop,Drive};
 struct Command {
     Kind kind{Kind::Stop};
     ContactUpdate update{};
     ModalExcitation hit{};
+    ModalDrive drive{};
     double seconds{};
     std::uint64_t key{};
 };
@@ -64,6 +65,7 @@ struct PhysicsStream::Impl {
             case Kind::Impact:(void)audio->impact(c.hit,c.seconds);break;
             case Kind::End:audio->end(c.key,c.seconds);break;
             case Kind::Stop:audio->stop(c.key);break;
+            case Kind::Drive:(void)audio->drive(c.drive);break;
             }
         }
         head.store(h,std::memory_order_release);
@@ -131,6 +133,10 @@ bool PhysicsStream::postImpact(const ModalExcitation& e,double delaySeconds) noe
 }
 bool PhysicsStream::postEnd(std::uint64_t contact,double rampSeconds) noexcept {Command c;c.kind=Kind::End;c.key=contact;c.seconds=rampSeconds;return impl_->push(c);}
 bool PhysicsStream::postStop(std::uint64_t instance) noexcept {Command c;c.kind=Kind::Stop;c.key=instance;return impl_->push(c);}
+bool PhysicsStream::postDrive(const ModalDrive& d) noexcept {
+    if(!impl_->audio->valid(d)){impl_->dropped.fetch_add(1,std::memory_order_relaxed);return false;}
+    Command c;c.kind=Kind::Drive;c.drive=d;return impl_->push(c);
+}
 std::uint64_t PhysicsStream::instanceIn(std::uint32_t slot) const noexcept {return slot<impl_->slots?impl_->published[slot].load(std::memory_order_relaxed):0;}
 std::uint64_t PhysicsStream::droppedCommands() const noexcept {return impl_->dropped.load(std::memory_order_relaxed);}
 BlockSource& PhysicsStream::voice(std::uint32_t slot){

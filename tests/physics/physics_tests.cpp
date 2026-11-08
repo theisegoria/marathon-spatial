@@ -11,6 +11,7 @@
 #include "marathon_spatial/physics/Modal.hpp"
 #include "marathon_spatial/physics/SampleLayers.hpp"
 #include "marathon_spatial/physics/Stream.hpp"
+#include <chrono>
 #include <thread>
 #include <algorithm>
 #include <atomic>
@@ -716,6 +717,47 @@ void stream(){
 }
 }
 
+// Models and surfaces registered while a render thread runs the stream, as a host builds a body's model on first sight; and drives
+// posted through the stream. A full model table refuses cleanly.
+void streamGrows(){
+    const auto model=panelModel();
+    ContactAudioSettings settings=audioSettings(0);
+    settings.synth.maximumModels=8;
+    ContactAudio audio(settings);
+    const auto first=audio.registerModel(model);
+    PhysicsStream live(audio,256);
+    std::atomic<bool> running{true};
+    std::atomic<double> heard{0};
+    std::thread render([&]{
+        std::vector<float> mono(256);
+        const std::uint32_t slots=audio.synth().settings().maximumVoices;
+        while(running.load(std::memory_order_acquire)){
+            blockCallback(&live,256,0);
+            double sum=0;
+            for(std::uint32_t v=0;v<slots;++v){(void)blockSourceCallback(&live.voice(v),mono.data(),256);for(float x:mono)sum+=double(x)*x;}
+            heard.store(heard.load(std::memory_order_relaxed)+sum,std::memory_order_relaxed);
+        }
+    });
+    std::vector<ModalModelHandle> handles{first};
+    for(int i=1;i<8;++i){
+        handles.push_back(audio.registerModel(model));
+        check(live.postImpact({.instance=std::uint64_t(100+i),.model=handles.back(),.sample=1u,.impulseNs=.05,.contactSeconds=1e-4}),"a model registered while streaming takes a hit");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    bool full=false;
+    try{(void)audio.registerModel(model);}catch(const std::invalid_argument&){full=true;}
+    check(full,"a full model table refuses the next model");
+    ModalDrive d;d.instance=200;d.model=handles[3];d.sample=0u;d.forceRmsN=.2;d.cutoffHz=800;
+    check(live.postDrive(d),"a drive posts through the stream");
+    ModalDrive bad=d;bad.instance=0;
+    check(!live.postDrive(bad),"a drive with no key is refused");
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    running.store(false,std::memory_order_release);
+    render.join();
+    check(heard.load()>0,"hits on late models and the drive sound");
+    check(audio.synth().modelCount()==8,"eight models published");
+}
+
 int main(){
     analyticClosedForms();
     ModalAnalysisResult bar;
@@ -733,6 +775,7 @@ int main(){
     fs::remove_all(dir);
     layers();
     stream();
+    streamGrows();
     std::printf(failures?"marathon spatial physics: %d FAILED\n":"marathon spatial physics: all passed\n",failures);
     return failures?1:0;
 }
