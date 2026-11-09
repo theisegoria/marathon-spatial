@@ -97,6 +97,13 @@ void LateReverbNetwork::prepare(const LateReverbConfig& config) {
     roomSendOther_.assign(rooms_.size(), {});
     for (std::uint32_t l = 0; l < links_.size(); ++l) links_[l].phaseStep = 2.f * kPi * (3.1f + 0.37f * float(l)) / config.sampleRate;
     linkInput_.assign(rooms_.size(), {});
+    splits_.assign(rooms_.size(), {});
+    for (std::uint32_t k = 0; k + 1 < kCoherenceBands; ++k) {  // Butterworth sections (Q = 1/sqrt 2); two in a row make Linkwitz-Riley.
+        const float w = 2.f * kPi * kCoherenceCrossovers[k] / config.sampleRate, cw = std::cos(w), alpha = std::sin(w) / (2.f * 0.70710678f);
+        const float a0 = 1.f + alpha;
+        splitLow_[k] = {(1.f - cw) / 2.f / a0, (1.f - cw) / a0, (1.f - cw) / 2.f / a0, -2.f * cw / a0, (1.f - alpha) / a0};
+        splitHigh_[k] = {(1.f + cw) / 2.f / a0, -(1.f + cw) / a0, (1.f + cw) / 2.f / a0, -2.f * cw / a0, (1.f - alpha) / a0};
+    }
 
     std::size_t memory = 0;
     for (std::uint32_t r = 0; r < rooms_.size(); ++r) {
@@ -262,6 +269,49 @@ void LateReverbNetwork::apply(const AcousticSnapshot& snapshot) {
     }
 }
 
+void LateReverbNetwork::setCoherence(const float* coherence) {
+    if (!coherence) {
+        binaural_.store(false, std::memory_order_release);
+        return;
+    }
+    for (std::uint32_t k = 0; k < kCoherenceBands; ++k)
+        coherence_[k].store(std::isfinite(coherence[k]) ? std::clamp(coherence[k], -1.f, 1.f) : 0.f, std::memory_order_relaxed);
+    binaural_.store(true, std::memory_order_release);
+}
+
+void LateReverbNetwork::binaural(std::uint32_t index, float* left, float* right, std::uint32_t frames) {
+    float a[kCoherenceBands], b[kCoherenceBands];
+    for (std::uint32_t k = 0; k < kCoherenceBands; ++k) {
+        const float c = coherence_[k].load(std::memory_order_relaxed);
+        a[k] = std::sqrt(0.5f * (1.f + c));
+        b[k] = std::sqrt(0.5f * (1.f - c));
+    }
+    const auto section = [](const Biquad& q, Section& s, float x) {
+        const float y = q.b0 * x + s.z1;
+        s.z1 = q.b1 * x - q.a1 * y + s.z2;
+        s.z2 = q.b2 * x - q.a2 * y;
+        return y;
+    };
+    std::array<Split, 2>& split = splits_[index];
+    for (std::uint32_t n = 0; n < frames; ++n) {
+        float shaped[2];
+        const float input[2] = {left[n], right[n]};
+        const float* gains[2] = {a, b};
+        for (std::uint32_t c = 0; c < 2; ++c) {
+            float rest = input[c], sum = 0.f;
+            for (std::uint32_t k = 0; k + 1 < kCoherenceBands; ++k) {
+                auto& st = split[c].stages[k];
+                const float low = section(splitLow_[k], st[1], section(splitLow_[k], st[0], rest));
+                rest = section(splitHigh_[k], st[3], section(splitHigh_[k], st[2], rest));
+                sum += gains[c][k] * low;
+            }
+            shaped[c] = sum + gains[c][kCoherenceBands - 1] * rest;
+        }
+        left[n] = shaped[0] + shaped[1];
+        right[n] = shaped[0] - shaped[1];
+    }
+}
+
 void LateReverbNetwork::renderRoom(std::uint32_t index, const float* input, std::uint32_t offset, std::uint32_t frames, float* left, float* right) {
     Room& room = rooms_[index];
     float* const memory = delayMemory_.data();
@@ -349,6 +399,7 @@ void LateReverbNetwork::process(const float* const* inputs, float* const* output
                 continue;
             }
             renderRoom(r, input, inputOffset, chunk, left, right);
+            if (left && right && binaural_.load(std::memory_order_acquire)) binaural(r, left, right, chunk);
             float level = 0.f;
             for (std::uint32_t n = 0; n < chunk; ++n) level = std::max(level, std::fabs(roomSend_[r][n]));
             room.silentChunks = driven || level > kSleepLevel ? 0 : room.silentChunks + 1;

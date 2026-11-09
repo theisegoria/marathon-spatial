@@ -250,6 +250,10 @@ ms_status ms_hrtf_import_sofa(const char* path, const ms_hrtf_import_options* op
 ms_status ms_hrtf_create_sphere(float head_radius_m, float sample_rate, ms_hrtf** hrtf);
 ms_status ms_hrtf_save(const ms_hrtf* hrtf, const char* path);
 void ms_hrtf_get_info(const ms_hrtf* hrtf, ms_hrtf_info* info);
+/* The set's interaural coherence in a diffuse field at each frequency: Re sum(w HL conj HR) / sqrt(sum w|HL|^2 sum w|HR|^2) over its
+   directions, weighted by solid angle, with each direction's interaural delay included. Near 1 at low frequencies and near 0 above about
+   1.5 kHz for a human head. MS_ERR_INVALID_ARGUMENT for a missing pointer or a frequency outside (0, rate / 2). */
+ms_status ms_hrtf_diffuse_coherence(const ms_hrtf* hrtf, const float* hz, uint32_t count, float* coherence);
 void ms_hrtf_retain(ms_hrtf* hrtf);
 void ms_hrtf_release(ms_hrtf* hrtf);
 

@@ -10,6 +10,8 @@
 
 #include "acoustics/AcousticSnapshot.hpp"
 
+#include <array>
+#include <atomic>
 #include <vector>
 
 namespace mspatial::acoustics {
@@ -17,6 +19,10 @@ namespace mspatial::acoustics {
 inline constexpr std::uint32_t kReverbLines = 16;
 inline constexpr std::uint32_t kReverbSections = kBandCount;
 inline constexpr std::uint32_t kReverbChunk = 32;
+// Binaural output: six bands split at these frequencies (Linkwitz-Riley), each with its own interaural coherence. Band centres are the
+// geometric means, the outer two an octave beyond: 141, 283, 566, 1131, 2263 and 4525 Hz.
+inline constexpr std::uint32_t kCoherenceBands = 6;
+inline constexpr std::array<float, kCoherenceBands - 1> kCoherenceCrossovers{200.f, 400.f, 800.f, 1600.f, 3200.f};
 
 struct LateReverbConfig {
     float sampleRate = 48000.f;
@@ -47,6 +53,11 @@ public:
     // convolution owns the start of the tail and the network carries on from where the response fades. Inputs injected through portals
     // are not delayed. kNone turns it off. Real time: call from the render thread before process(); a changed room clears the delay.
     void setHybrid(std::uint32_t room, std::uint32_t delaySamples, const Bands& gainDb);
+
+    // Binaural output: left and right become a.A + b.B and a.A - b.B of the network's two orthogonal outputs, with a^2 + b^2 = 1 and
+    // (a^2 - b^2) the given interaural coherence per band, so the tail reaches the ears as a diffuse field would through the listener's
+    // HRTF set, with its level unchanged. Null returns to the two orthogonal outputs. Any thread; the render picks it up at its next chunk.
+    void setCoherence(const float* coherence);
 
     // Delay memory in one room's network, in samples.
     std::uint32_t totalDelay(std::uint32_t room) const;
@@ -86,6 +97,14 @@ private:
     void design(Room& room);
     void designLink(Link& link, const Bands& rate, float fromVolume, float toVolume);
     void renderRoom(std::uint32_t index, const float* input, std::uint32_t offset, std::uint32_t frames, float* left, float* right);
+    // The binaural band split of one signal: per crossover, a low-pass and a high-pass of two Butterworth stages each.
+    struct Section {float z1 = 0.f, z2 = 0.f;};
+    struct Split {std::array<std::array<Section, 4>, kCoherenceBands - 1> stages{};};
+    void binaural(std::uint32_t room, float* left, float* right, std::uint32_t frames);
+    std::array<Biquad, kCoherenceBands - 1> splitLow_{}, splitHigh_{};
+    std::vector<std::array<Split, 2>> splits_;
+    std::array<std::atomic<float>, kCoherenceBands> coherence_{};
+    std::atomic<bool> binaural_{false};
 
     LateReverbConfig config_;
     std::vector<Room> rooms_;

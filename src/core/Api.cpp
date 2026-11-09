@@ -574,6 +574,33 @@ ms_status ms_hrtf_save(const ms_hrtf* hrtf, const char* path) {
     return mspatial::hrtf::saveSet(*asSet(hrtf), path);
 }
 
+ms_status ms_hrtf_diffuse_coherence(const ms_hrtf* hrtf, const float* hz, uint32_t count, float* coherence) {
+    if (!hrtf || (count && (!hz || !coherence))) return MS_ERR_INVALID_ARGUMENT;
+    const HrtfSet& s = *asSet(hrtf);
+    for (uint32_t i = 0; i < count; ++i)
+        if (!(hz[i] > 0.0f && hz[i] < 0.5f * s.sampleRate)) return MS_ERR_INVALID_ARGUMENT;
+    for (uint32_t i = 0; i < count; ++i) {
+        const double w = 2.0 * 3.14159265358979323846 * hz[i] / s.sampleRate;
+        double cross = 0.0, powerL = 0.0, powerR = 0.0;
+        for (uint32_t d = 0; d < s.directions; ++d) {
+            std::complex<double> h[2];
+            for (uint32_t ear = 0; ear < 2; ++ear) {
+                const float* f = s.filters.data() + (static_cast<std::size_t>(d) * 2 + ear) * s.taps;
+                std::complex<double> sum = 0.0;
+                for (uint32_t t = 0; t < s.taps; ++t) sum += static_cast<double>(f[t]) * std::polar(1.0, -w * t);
+                const double delay = s.delays.size() ? s.delays[static_cast<std::size_t>(d) * 2 + ear] : 0.0;
+                h[ear] = sum * std::polar(1.0, -w * delay);
+            }
+            const double q = s.quadrature.size() ? s.quadrature[d] : 1.0 / s.directions;
+            cross += q * (h[0] * std::conj(h[1])).real();
+            powerL += q * std::norm(h[0]);
+            powerR += q * std::norm(h[1]);
+        }
+        coherence[i] = powerL > 0.0 && powerR > 0.0 ? static_cast<float>(cross / std::sqrt(powerL * powerR)) : 0.0f;
+    }
+    return MS_OK;
+}
+
 void ms_hrtf_get_info(const ms_hrtf* hrtf, ms_hrtf_info* info) {
     const HrtfSet& s = *asSet(hrtf);
     *info = ms_hrtf_info{};

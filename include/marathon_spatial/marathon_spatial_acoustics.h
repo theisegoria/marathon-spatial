@@ -198,6 +198,14 @@ void ms_acoustics_reverb_process(ms_acoustics* acoustics, const float* const* in
 void ms_acoustics_reverb_process_ambisonic(ms_acoustics* acoustics, const float* const* inputs, float* const* left, float* const* right,
                                            float* const* ambisonic, uint32_t frames);
 
+/* Binaural late reverberation. Each room network's left and right become mixes of its two orthogonal outputs whose interaural coherence
+   follows coherence[band] in six bands centred on 141, 283, 566, 1131, 2263 and 4525 Hz (crossovers 200, 400, 800, 1600, 3200 Hz), at
+   unchanged level. Give it the listener's HRTF set's diffuse-field coherence (ms_hrtf_diffuse_coherence at those centres), so the tail
+   reaches the ears as a diffuse field would. NULL returns to two uncorrelated outputs. Any thread; heard from the next render chunk. */
+#define MS_LATE_COHERENCE_BANDS 6
+extern const float ms_late_coherence_hz[MS_LATE_COHERENCE_BANDS];
+void ms_acoustics_set_late_coherence(ms_acoustics* acoustics, const float* coherence);
+
 #ifdef __cplusplus
 }
 #endif

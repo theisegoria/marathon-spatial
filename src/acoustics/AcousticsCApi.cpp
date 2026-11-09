@@ -466,6 +466,12 @@ void processHybrid(ms_acoustics* a, const float* const* inputs, float* const* le
 
 }  // namespace
 
+const float ms_late_coherence_hz[MS_LATE_COHERENCE_BANDS] = {141.4f, 282.8f, 565.7f, 1131.4f, 2262.7f, 4525.5f};
+
+void ms_acoustics_set_late_coherence(ms_acoustics* a, const float* coherence) {
+    if (a) a->reverb.setCoherence(coherence);
+}
+
 void ms_acoustics_reverb_process(ms_acoustics* a, const float* const* inputs, float* const* left, float* const* right, uint32_t frames) {
     processHybrid(a, inputs, left, right, nullptr, frames);
 }

@@ -2340,6 +2340,23 @@ void testSpeakers() {
     ms_engine_destroy(flexible);
 }
 
+// The diffuse-field interaural coherence a binaural late field is matched to: near 1 in the bass, near 0 above a couple of kHz.
+void testDiffuseCoherence() {
+    const float hz[6] = {141.4f, 282.8f, 565.7f, 1131.4f, 2262.7f, 4525.5f};
+    std::vector<std::pair<std::string, ms_hrtf*>> sets{{"sphere", gSphere}};
+    for (const auto& m : gMeasured) sets.push_back(m);
+    for (const auto& [name, set] : sets) {
+        float c[6];
+        OK(ms_hrtf_diffuse_coherence(set, hz, 6, c));
+        std::printf("  %s diffuse coherence: %.2f %.2f %.2f %.2f %.2f %.2f\n", name.c_str(), c[0], c[1], c[2], c[3], c[4], c[5]);
+        CHECK(c[0] > 0.85f, "%s: coherent at 141 Hz", name.c_str());
+        CHECK(c[0] > c[2] && std::fabs(c[5]) < 0.3f, "%s: falls with frequency, near 0 at 4.5 kHz", name.c_str());
+    }
+    const float bad = 30000.0f;
+    float c;
+    CHECK(ms_hrtf_diffuse_coherence(gSphere, &bad, 1, &c) == MS_ERR_INVALID_ARGUMENT, "a frequency above Nyquist");
+}
+
 // 2.1: the crossover splits the finished pair, the subwoofer carries what the mains give up, and the sum is whole.
 void testBassManagement() {
     ms_speaker_layout stereo;
@@ -2729,6 +2746,7 @@ int main(int argumentCount, char** arguments) {
     run("ambisonics", testAmbisonics);
     run("speakers", testSpeakers);
     run("bass management", testBassManagement);
+    run("diffuse coherence", testDiffuseCoherence);
     run("device channels", testDeviceChannels);
     run("crosstalk", testCrosstalk);
     run("moving source", testMovingSourceStaysClean);

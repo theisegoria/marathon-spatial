@@ -662,6 +662,62 @@ void lateReverbLevelIsPhysical() {
     near(cross / std::sqrt(energyL * energyR), 0.0, 0.15, "left and right decorrelated");
 }
 
+void lateReverbBinauralCoherence() {
+    // The binaural stage sets the tail's interaural coherence per band and leaves its level alone.
+    const auto run = [](const float* coherence, std::vector<float>& left, std::vector<float>& right) {
+        LateReverbConfig config;
+        config.rooms = 1;
+        config.links = 0;
+        LateReverbNetwork reverb;
+        reverb.prepare(config);
+        AcousticSnapshot& snapshot = *reverbSnapshot();
+        setRoom(snapshot, 0, 500.f, uniformBands(1.5f));
+        reverb.apply(snapshot);
+        reverb.setCoherence(coherence);
+        const std::uint32_t frames = 48000 * 3;
+        std::vector<float> input(frames);
+        std::uint32_t seed = 12345;
+        for (auto& x : input) {
+            seed = seed * 1664525u + 1013904223u;
+            x = float(int(seed >> 9) - (1 << 22)) / float(1 << 22) * 0.1f;
+        }
+        left.assign(frames, 0.f);
+        right.assign(frames, 0.f);
+        const float* inputs[] = {input.data()};
+        float* lefts[] = {left.data()};
+        float* rights[] = {right.data()};
+        reverb.process(inputs, lefts, rights, frames);
+    };
+    // Coherence of left and right in a band around hz, from a second-order band-pass of each.
+    const auto bandCoherence = [](const std::vector<float>& l, const std::vector<float>& r, double hz) {
+        const double w = 2 * std::numbers::pi * hz / 48000, alpha = std::sin(w) / (2 * 2.0), a0 = 1 + alpha;
+        const double b0 = alpha / a0, b2 = -alpha / a0, a1 = -2 * std::cos(w) / a0, a2 = (1 - alpha) / a0;
+        double zl[2]{}, zr[2]{}, cross = 0, pl = 0, pr = 0;
+        for (std::size_t i = 0; i < l.size(); ++i) {
+            const auto step = [&](double x, double* z) {const double y = b0 * x + z[0]; z[0] = -a1 * y + z[1]; z[1] = b2 * x - a2 * y; return y;};
+            const double yl = step(l[i], zl), yr = step(r[i], zr);
+            if (i < 24000) continue;
+            cross += yl * yr;
+            pl += yl * yl;
+            pr += yr * yr;
+        }
+        return cross / std::sqrt(pl * pr);
+    };
+    const auto energy = [](const std::vector<float>& x) {double e = 0; for (float v : x) e += double(v) * v; return e;};
+    std::vector<float> offL, offR, onL, onR;
+    const float target[kCoherenceBands] = {0.95f, 0.8f, 0.4f, 0.1f, 0.f, 0.f};
+    run(nullptr, offL, offR);
+    run(target, onL, onR);
+    const double low = bandCoherence(onL, onR, 141), high = bandCoherence(onL, onR, 4000), lowOff = bandCoherence(offL, offR, 141);
+    std::printf("  binaural late field: coherence at 141 Hz %.2f (off %.2f), at 4 kHz %.2f; level %.2f dB left, %.2f dB right\n", low, lowOff, high,
+                10 * std::log10(energy(onL) / energy(offL)), 10 * std::log10(energy(onR) / energy(offR)));
+    check(low > 0.8, "low band takes the set's high coherence");
+    check(std::fabs(high) < 0.15, "high band stays incoherent");
+    check(std::fabs(lowOff) < 0.3, "without the stage the low band is not coherent");
+    near(10 * std::log10(energy(onL) / energy(offL)), 0.0, 0.5, "left level unchanged, dB");
+    near(10 * std::log10(energy(onR) / energy(offR)), 0.0, 0.5, "right level unchanged, dB");
+}
+
 void coupledReverbMatchesTheModes() {
     // Small dead room next to a big live one, energy feeding back through a door: the double slope must follow the analytic modes.
     AcousticSnapshot& snapshot = *reverbSnapshot();
@@ -1678,6 +1734,7 @@ int main() {
     coupledRoomsAnalytic();
     lateReverbDecayFollowsTheRoom();
     lateReverbLevelIsPhysical();
+    lateReverbBinauralCoherence();
     coupledReverbMatchesTheModes();
     reverbProcessIsRealTimeSafe();
     sleepingRoomsWakeWithoutLoss();
