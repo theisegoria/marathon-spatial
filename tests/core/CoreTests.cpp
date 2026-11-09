@@ -2438,6 +2438,20 @@ void testDeviceChannels() {
     CHECK(layout.speakers[5].lfe && layout.speakers[6].lfe, "channels past the layout stay silent");
     const auto nothing = describedLayout({discrete});
     CHECK(!core::speakerLayoutFromChannelLayout(*reinterpret_cast<const AudioChannelLayout*>(nothing.data()), 1, layout), "a layout that places nothing");
+    // 2.1: left, right and LFE by label in any order; by tag; three unlabelled channels; labels that are not 2.1.
+    std::uint32_t sl, sr, ss;
+    AudioChannelDescription lfe{kAudioChannelLabel_LFEScreen, 0, {}}, rightCh{kAudioChannelLabel_Right, 0, {}}, unknown{kAudioChannelLabel_Unknown, 0, {}};
+    const auto lfeFirst = describedLayout({lfe, rightCh, left});
+    CHECK(core::stereoSubFromChannelLayout(reinterpret_cast<const AudioChannelLayout*>(lfeFirst.data()), 3, sl, sr, ss) && sl == 2 && sr == 1 && ss == 0,
+          "2.1 by label: left %u right %u sub %u", sl, sr, ss);
+    tagged.mChannelLayoutTag = kAudioChannelLayoutTag_DVD_4;  // L R LFE
+    CHECK(core::stereoSubFromChannelLayout(&tagged, 3, sl, sr, ss) && sl == 0 && sr == 1 && ss == 2, "2.1 by tag");
+    CHECK(core::stereoSubFromChannelLayout(nullptr, 3, sl, sr, ss) && sl == 0 && sr == 1 && ss == 2, "three unlabelled channels count as 2.1");
+    CHECK(!core::stereoSubFromChannelLayout(nullptr, 4, sl, sr, ss), "four unlabelled channels do not");
+    const auto noSub = describedLayout({left, rightCh, unknown});
+    CHECK(!core::stereoSubFromChannelLayout(reinterpret_cast<const AudioChannelLayout*>(noSub.data()), 3, sl, sr, ss), "left, right and an unknown channel have no sub");
+    tagged.mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A;
+    CHECK(core::stereoSubFromChannelLayout(&tagged, 6, sl, sr, ss) && ss == 3, "a 5.1 device can take a stereo engine as 2.1");
 
     // Writing: one interleaved buffer of eight channels with six to fill, then one buffer per channel.
     constexpr std::uint32_t frames = 16;

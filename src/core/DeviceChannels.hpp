@@ -16,6 +16,11 @@ namespace mspatial::core {
 // silent. False when the layout cannot be read or places no speaker.
 bool speakerLayoutFromChannelLayout(const AudioChannelLayout& layout, std::uint32_t deviceChannels, ms_speaker_layout& out);
 
+// Where a 2.1 device takes left, right and subwoofer: the channels its layout labels left, right (or places at +-30 degrees) and LFE. With no
+// usable labels, exactly three channels count as left, right, LFE. False when the device has no subwoofer channel to address.
+bool stereoSubFromChannelLayout(const AudioChannelLayout* layout, std::uint32_t deviceChannels, std::uint32_t& left, std::uint32_t& right,
+                                std::uint32_t& sub);
+
 // Writes channels[c] (frames samples each) into device channel c of output, whether the device's buffers are interleaved or one per channel.
 // Device channels past count are silenced. Real-time safe.
 void writeDeviceChannels(const float* const* channels, std::uint32_t count, std::uint32_t frames, AudioBufferList& output) noexcept;

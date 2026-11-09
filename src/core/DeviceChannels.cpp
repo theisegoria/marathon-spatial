@@ -75,24 +75,59 @@ bool positionOf(const AudioChannelDescription& d, Position& out) {
     }
 }
 
+// A layout named by a tag or a bitmap, expanded into descriptions; the layout itself when it has them. Null when it cannot be expanded.
+const AudioChannelLayout* describe(const AudioChannelLayout& layout, std::vector<unsigned char>& expanded) {
+    if (layout.mChannelLayoutTag == kAudioChannelLayoutTag_UseChannelDescriptions) return &layout;
+    const bool bitmap = layout.mChannelLayoutTag == kAudioChannelLayoutTag_UseChannelBitmap;
+    const AudioFormatPropertyID property = bitmap ? kAudioFormatProperty_ChannelLayoutForBitmap : kAudioFormatProperty_ChannelLayoutForTag;
+    const void* specifier = bitmap ? static_cast<const void*>(&layout.mChannelBitmap) : static_cast<const void*>(&layout.mChannelLayoutTag);
+    const UInt32 specifierSize = bitmap ? sizeof layout.mChannelBitmap : sizeof layout.mChannelLayoutTag;
+    UInt32 size = 0;
+    if (AudioFormatGetPropertyInfo(property, specifierSize, specifier, &size) != noErr || size < offsetof(AudioChannelLayout, mChannelDescriptions)) return nullptr;
+    expanded.resize(size);
+    if (AudioFormatGetProperty(property, specifierSize, specifier, &size, expanded.data()) != noErr) return nullptr;
+    return reinterpret_cast<const AudioChannelLayout*>(expanded.data());
+}
+
 }  // namespace
+
+bool stereoSubFromChannelLayout(const AudioChannelLayout* layout, std::uint32_t deviceChannels, std::uint32_t& left, std::uint32_t& right,
+                                std::uint32_t& sub) {
+    constexpr std::uint32_t kNone = ~0u;
+    left = right = sub = kNone;
+    std::vector<unsigned char> expanded;
+    const AudioChannelLayout* described = layout ? describe(*layout, expanded) : nullptr;
+    if (described) {
+        const std::uint32_t n = std::min<std::uint32_t>(deviceChannels, described->mNumberChannelDescriptions);
+        for (std::uint32_t c = 0; c < n; ++c) {
+            Position p{};
+            if (!positionOf(described->mChannelDescriptions[c], p)) continue;
+            if (p.lfe) {
+                if (sub == kNone) sub = c;
+            } else if (p.elevation == 0.0f && std::fabs(p.azimuth - 30.0f) < 1.0f) {
+                if (left == kNone) left = c;
+            } else if (p.elevation == 0.0f && std::fabs(p.azimuth + 30.0f) < 1.0f) {
+                if (right == kNone) right = c;
+            }
+        }
+        if (left != kNone && right != kNone && sub != kNone) return true;
+        if (left != kNone || right != kNone || sub != kNone) return false;  // Labelled, but not as a 2.1 set.
+    }
+    if (deviceChannels == 3) {  // Nothing labelled: three channels are taken as left, right, LFE.
+        left = 0;
+        right = 1;
+        sub = 2;
+        return true;
+    }
+    left = right = sub = kNone;
+    return false;
+}
 
 bool speakerLayoutFromChannelLayout(const AudioChannelLayout& layout, std::uint32_t deviceChannels, ms_speaker_layout& out) {
     out = ms_speaker_layout{};
-    // A layout named by a tag or a bitmap is expanded into descriptions first.
     std::vector<unsigned char> expanded;
-    const AudioChannelLayout* described = &layout;
-    if (layout.mChannelLayoutTag != kAudioChannelLayoutTag_UseChannelDescriptions) {
-        const bool bitmap = layout.mChannelLayoutTag == kAudioChannelLayoutTag_UseChannelBitmap;
-        const AudioFormatPropertyID property = bitmap ? kAudioFormatProperty_ChannelLayoutForBitmap : kAudioFormatProperty_ChannelLayoutForTag;
-        const void* specifier = bitmap ? static_cast<const void*>(&layout.mChannelBitmap) : static_cast<const void*>(&layout.mChannelLayoutTag);
-        const UInt32 specifierSize = bitmap ? sizeof layout.mChannelBitmap : sizeof layout.mChannelLayoutTag;
-        UInt32 size = 0;
-        if (AudioFormatGetPropertyInfo(property, specifierSize, specifier, &size) != noErr || size < offsetof(AudioChannelLayout, mChannelDescriptions)) return false;
-        expanded.resize(size);
-        if (AudioFormatGetProperty(property, specifierSize, specifier, &size, expanded.data()) != noErr) return false;
-        described = reinterpret_cast<const AudioChannelLayout*>(expanded.data());
-    }
+    const AudioChannelLayout* described = describe(layout, expanded);
+    if (!described) return false;
     out.count = std::min<std::uint32_t>(deviceChannels, MS_MAX_SPEAKERS);
     bool any = false;
     for (std::uint32_t c = 0; c < out.count; ++c) {

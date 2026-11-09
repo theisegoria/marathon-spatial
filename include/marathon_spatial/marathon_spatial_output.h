@@ -22,6 +22,10 @@ ms_status ms_output_default_sample_rate(float* sample_rate);
    position (unknown or discrete) come back as lfe and stay silent. device_uid as for ms_output_create. MS_ERR_NOT_FOUND when the device
    reports no layout it can place; a plain stereo device reports L and R. */
 ms_status ms_output_device_layout(const char* device_uid, ms_speaker_layout* layout);
+/* The device channel a stereo engine's subwoofer feed goes to when the device is 2.1: a channel labelled LFE beside ones labelled left and
+   right, or the third of exactly three unlabelled channels. *channel is -1 when there is none. A stereo engine on such a device renders
+   with ms_engine_render_2_1, so ms_engine_set_bass_management takes effect there. */
+ms_status ms_output_device_sub_channel(const char* device_uid, int32_t* channel);
 
 /* Binds an engine to a device. device_uid is a Core Audio device UID, or NULL for the default output device.
    Fails with MS_ERR_RATE_MISMATCH when the device's rate is not the engine's. Nothing runs until ms_output_start().
@@ -62,7 +66,8 @@ typedef struct ms_output_stats {
     uint32_t device_alive;
     uint32_t latency_frames; /* Device, stream and safety offset latency. */
     uint32_t device_channels;  /* Output channels the device has. */
-    uint32_t engine_channels;  /* Channels the engine renders to it: its speakers, or 2 when it plays stereo. */
+    uint32_t engine_channels;  /* Channels the engine renders to it: its speakers, 2 when it plays stereo, 3 for 2.1. */
+    int32_t sub_channel;       /* The device channel the subwoofer feed goes to (ms_engine_render_2_1), or -1. */
 } ms_output_stats;
 
 void ms_output_get_stats(const ms_output* output, ms_output_stats* stats);
