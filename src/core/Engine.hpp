@@ -47,7 +47,7 @@ struct ListenerSnapshot {
 enum class CommandType : std::uint32_t {
     SourceReset, SourceBuffer, SourceCallback, SourcePlay, SourceStop, SourceSeek,
     BedReset, BedBuffer, BedCallback, BedPlay, BedStop,
-    BusProcessor, BlockCallback, BufferRetire, SetHrtf, SetCrosstalk, SetSpeakers
+    BusProcessor, BlockCallback, BufferRetire, SetHrtf, SetCrosstalk, SetSpeakers, SetBass
 };
 
 struct Command {
@@ -273,6 +273,11 @@ struct ms_engine {
     bool crosstalkFade{}, crosstalkFed{};
     std::uint32_t crosstalkHead{}, crosstalkPartitions{};
     mspatial::core::Aligned<float> crosstalkWindow, crosstalkFdlRe, crosstalkFdlIm, crosstalkOut;
+    // Bass management (2.1): fourth-order Linkwitz-Riley, each half two Butterworth stages. Render side; bassSet is the control side's.
+    bool bass{}, bassSet{};
+    float bassHz{}, bassGain{1.0f}, bassGainFrom{1.0f};
+    mspatial::core::Biquad bassHigh[2][2], bassLow[2];
+    mspatial::core::Aligned<float> subMix;
     float limiterGain{1.0f};
     float airTable[2]{};   // Shelf gains in dB per metre
     std::uint64_t opForward{}, opInverse{}, opSpectrum{}, opReal{}, opUpdates{};

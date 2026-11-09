@@ -248,6 +248,24 @@ ms_status ms_engine_set_speaker_layout(ms_engine* engine, const ms_speaker_layou
     return MS_OK;
 }
 
+ms_status ms_engine_set_bass_management(ms_engine* engine, const ms_bass_management* params) {
+    if (!engine) return MS_ERR_INVALID_ARGUMENT;
+    ms_engine& e = *engine;
+    if (params) {
+        if (!(params->crossover_hz >= 20.0f && params->crossover_hz <= 300.0f) || !(params->sub_gain_db >= -24.0f && params->sub_gain_db <= 12.0f))
+            return MS_ERR_INVALID_ARGUMENT;
+        if (e.fixedLayout) return MS_ERR_UNSUPPORTED;
+    }
+    Guard guard(engine);
+    if (!params && !e.bassSet) return MS_OK;
+    e.bassSet = params != nullptr;
+    const float gain = params ? std::pow(10.0f, params->sub_gain_db / 20.0f) : 1.0f;
+    std::uint32_t bits;
+    std::memcpy(&bits, &gain, sizeof bits);
+    queue(e, CommandType::SetBass, 0, params ? 1u : 0u, bits, 0, params ? params->crossover_hz : 0.0);
+    return MS_OK;
+}
+
 uint32_t ms_engine_crosstalk_latency_frames(const ms_engine* engine) {
     return engine && engine->currentCrosstalk ? engine->currentCrosstalk->latencyFrames : 0;
 }
@@ -372,7 +390,8 @@ ms_status ms_engine_create(const ms_engine_desc* desc, ms_engine** engine) {
         }
         // Room for a layout's channels, or for the two of a stereo layout a headphone engine may switch to.
         e.speakerMix.reset(static_cast<std::size_t>(std::max(e.speakers, 2u)) * B);
-        e.fifo.reset(static_cast<std::size_t>(std::max(e.speakers, 2u)) * B);
+        e.fifo.reset(static_cast<std::size_t>(std::max(e.speakers, 3u)) * B);
+        e.subMix.reset(B);
         e.crosstalkPartitions = (kMaxCrosstalkTaps + B - 1) / B;
         e.crosstalkWindow.reset(4ull * B);
         e.crosstalkFdlRe.reset(2ull * e.crosstalkPartitions * B);

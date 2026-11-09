@@ -2340,6 +2340,58 @@ void testSpeakers() {
     ms_engine_destroy(flexible);
 }
 
+// 2.1: the crossover splits the finished pair, the subwoofer carries what the mains give up, and the sum is whole.
+void testBassManagement() {
+    ms_speaker_layout stereo;
+    OK(ms_speaker_layout_preset(MS_SPEAKERS_STEREO, &stereo));
+    struct Energy {double mains = 0, sub = 0, sum = 0;};
+    // A centred tone, rendered as 2.1; bass: nullptr for off.
+    auto run21 = [&](float hz, const ms_bass_management* bass) {
+        ms_engine* h = makeEngine(gSphere);
+        std::vector<float> tone(48000);
+        for (std::uint32_t t = 0; t < tone.size(); ++t) tone[t] = 0.25f * std::sin(2.0f * core::kPi * hz * static_cast<float>(t) / kRate);
+        ms_buffer b;
+        OK(ms_buffer_create(h, tone.data(), tone.size(), 1, kRate, &b));
+        ms_source src;
+        OK(ms_source_create(h, &src));
+        const ms_source_params params = plainParams({0, 0, -2});
+        OK(ms_source_set_params(h, src, &params));
+        OK(ms_source_set_buffer(h, src, b, 0, 1));
+        OK(ms_source_play(h, src, 0));
+        OK(ms_engine_set_speaker_layout(h, &stereo));
+        OK(ms_engine_set_bass_management(h, bass));
+        OK(ms_engine_commit(h));
+        std::vector<float> l(19200), r(19200), sub(19200);
+        ms_engine_render_2_1(h, l.data(), r.data(), sub.data(), 19200);
+        Energy e;
+        for (std::uint32_t t = 9600; t < 19200; ++t) {  // Past the filters' settling and any onset.
+            e.mains += double(l[t]) * l[t] + double(r[t]) * r[t];
+            e.sub += double(sub[t]) * sub[t];
+            const double whole = double(l[t]) + r[t] + sub[t];
+            e.sum += whole * whole;
+        }
+        ms_engine_destroy(h);
+        return e;
+    };
+    const ms_bass_management at80{80.0f, 0.0f}, louder{80.0f, 6.0f};
+    const Energy low = run21(30, &at80), high = run21(1000, &at80), cross = run21(80, &at80), crossOff = run21(80, nullptr), boosted = run21(30, &louder);
+    std::printf("  2.1 at 80 Hz: 30 Hz sub/mains %.3g, 1 kHz sub/mains %.3g, whole at the crossover %.3f dB from 2.0, +6 dB sub x%.2f\n",
+                low.sub / low.mains, high.sub / high.mains, 10 * std::log10(cross.sum / crossOff.sum), boosted.sub / low.sub);
+    CHECK(low.sub > 20 * low.mains, "an octave and more below the crossover, the subwoofer carries the bass");
+    CHECK(high.sub < 1e-4 * high.mains, "well above it, the subwoofer is quiet");
+    CHECK(std::fabs(10 * std::log10(cross.sum / crossOff.sum)) < 0.2, "at the crossover the three channels add up to the stereo they replace");
+    CHECK(crossOff.sub == 0, "with bass management off the subwoofer channel is silent");
+    CHECK(std::fabs(boosted.sub / low.sub - 3.98) < 0.1, "the sub gain is a plain gain on the subwoofer");
+    ms_engine* h = makeEngine(gSphere);
+    const ms_bass_management tooLow{10.0f, 0.0f}, tooLoud{80.0f, 20.0f};
+    CHECK(ms_engine_set_bass_management(h, &tooLow) == MS_ERR_INVALID_ARGUMENT, "crossover range");
+    CHECK(ms_engine_set_bass_management(h, &tooLoud) == MS_ERR_INVALID_ARGUMENT, "sub gain range");
+    OK(ms_engine_set_bass_management(h, &at80));
+    OK(ms_engine_set_bass_management(h, nullptr));
+    OK(ms_engine_commit(h));
+    ms_engine_destroy(h);
+}
+
 // A channel layout with descriptions, as a device would report one.
 std::vector<unsigned char> describedLayout(const std::vector<AudioChannelDescription>& descriptions) {
     std::vector<unsigned char> bytes(offsetof(AudioChannelLayout, mChannelDescriptions) + descriptions.size() * sizeof(AudioChannelDescription));
@@ -2662,6 +2714,7 @@ int main(int argumentCount, char** arguments) {
     run("near field", testNearField);
     run("ambisonics", testAmbisonics);
     run("speakers", testSpeakers);
+    run("bass management", testBassManagement);
     run("device channels", testDeviceChannels);
     run("crosstalk", testCrosstalk);
     run("moving source", testMovingSourceStaysClean);

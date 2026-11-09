@@ -200,6 +200,22 @@ ms_status ms_engine_set_speaker_layout(ms_engine* engine, const ms_speaker_layou
 /* 2 for headphones, else the layout's speaker count. */
 uint32_t ms_engine_output_channels(const ms_engine* engine);
 
+/* Bass management for 2.1: two main speakers and a subwoofer on its own channel. Fourth-order Linkwitz-Riley filters split the two
+   finished main channels at crossover_hz: each main keeps what is above it, and the sum of both below it feeds the subwoofer at
+   sub_gain_db (0 dB matches what the two mains would have played together). The split adds no level change and no notch at the
+   crossover. It acts on the finished stereo, after the crosstalk canceller and two-speaker layouts, so the canceller's band stays on
+   the mains. */
+typedef struct ms_bass_management {
+    float crossover_hz; /* 20 to 300 */
+    float sub_gain_db;  /* -24 to +12 */
+} ms_bass_management;
+/* Takes effect at the next commit; a new sub gain ramps over one block. NULL turns it off. MS_ERR_INVALID_ARGUMENT for values out of
+   range, MS_ERR_UNSUPPORTED on an engine created with a layout. */
+ms_status ms_engine_set_bass_management(ms_engine* engine, const ms_bass_management* params);
+/* Left, right and subwoofer. With bass management off the mains are full range and sub is silent; ms_engine_render always gives the
+   mains full range. Use one entry point per engine, as for ms_engine_render_speakers. Real-time safe. */
+uint64_t ms_engine_render_2_1(ms_engine* engine, float* left, float* right, float* sub, uint32_t frames);
+
 /* The total latency of the direct path in frames, excluding any device latency. A set resampled to the engine's rate adds
    a further 8 frames' worth at 48 kHz (167 microseconds) to every direction alike. */
 uint32_t ms_engine_direct_latency_frames(const ms_engine* engine);

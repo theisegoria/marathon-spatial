@@ -311,6 +311,31 @@ void processCommands(ms_engine& e) {
                 for (std::uint32_t i = 0; i < e.desc.max_sources; ++i) e.sources[i].haveSpeakerGain = false;
                 break;
             }
+            case CommandType::SetBass: {
+                float gain;
+                std::memcpy(&gain, &c.b, sizeof gain);
+                const float hz = static_cast<float>(c.position);
+                if (!c.a) {
+                    e.bass = false;
+                    break;
+                }
+                if (!e.bass || hz != e.bassHz) {
+                    const Biquad low = designLowpass(hz, 0.70710678f, e.rate), high = designHighpass(hz, 0.70710678f, e.rate);
+                    for (auto& stage : e.bassLow) stage.setCoefficients(low);
+                    for (auto& side : e.bassHigh)
+                        for (auto& stage : side) stage.setCoefficients(high);
+                }
+                if (!e.bass) {  // From off: fresh filters and no ramp from a gain nobody heard.
+                    for (auto& stage : e.bassLow) stage.clear();
+                    for (auto& side : e.bassHigh)
+                        for (auto& stage : side) stage.clear();
+                    e.bassGainFrom = gain;
+                }
+                e.bass = true;
+                e.bassHz = hz;
+                e.bassGain = gain;
+                break;
+            }
             case CommandType::SetCrosstalk: {
                 if (e.retiringCrosstalk) (void)e.retired.push({Retired::Kind::Crosstalk, const_cast<CrosstalkFilter*>(e.retiringCrosstalk), nullptr});
                 e.retiringCrosstalk = e.previousCrosstalk;
@@ -1318,6 +1343,22 @@ void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
         finals[0] = master.left;
         finals[1] = master.right;
     }
+    // 2.1: a third channel for the subwoofer, split from the finished pair.
+    if (outCount == 3 && F == 2) {
+        float* sub = finals[2] = e.subMix.data();
+        if (e.bass) {
+            vDSP_vadd(finals[0], 1, finals[1], 1, sub, 1, B);
+            for (auto& stage : e.bassLow) stage.process(sub, B);
+            applyRamp(sub, B, e.bassGainFrom, e.bassGain);
+            e.bassGainFrom = e.bassGain;
+            for (std::uint32_t c = 0; c < 2; ++c)
+                for (auto& stage : e.bassHigh[c]) stage.process(finals[c], B);
+            e.opReal += 12ull * B;
+        } else {
+            std::memset(sub, 0, B * sizeof(float));
+        }
+        F = 3;
+    }
     if (e.desc.limiter) {
         float peak = 0.0f;
         for (std::uint32_t c = 0; c < F; ++c) {
@@ -1362,7 +1403,8 @@ void renderBlock(ms_engine& e, float* const* outs, std::uint32_t outCount) {
     if (outCount == F) {
         for (std::uint32_t c = 0; c < F; ++c) std::memcpy(outs[c], finals[c], B * sizeof(float));
     } else {
-        // A speaker render asked for as stereo: fold the speakers down.
+        // A speaker render asked for as stereo (or 2.1, with a silent subwoofer): fold the speakers down.
+        if (outCount == 3) std::memset(outs[2], 0, B * sizeof(float));
         for (std::uint32_t side = 0; side < 2; ++side) {
             std::memset(outs[side], 0, B * sizeof(float));
             for (std::uint32_t k = 0; k < F; ++k) {
@@ -1438,6 +1480,11 @@ extern "C" uint64_t ms_engine_render(ms_engine* engine, float* left, float* righ
 
 extern "C" uint64_t ms_engine_render_speakers(ms_engine* engine, float* const* channels, uint32_t frames) {
     return renderFrames(*engine, channels, engine->speakers ? engine->speakers : 2, frames);
+}
+
+extern "C" uint64_t ms_engine_render_2_1(ms_engine* engine, float* left, float* right, float* sub, uint32_t frames) {
+    float* outs[3] = {left, right, sub};
+    return renderFrames(*engine, outs, 3, frames);
 }
 
 extern "C" uint32_t ms_engine_output_channels(const ms_engine* engine) { return engine->speakers ? engine->speakers : 2; }
